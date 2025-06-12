@@ -307,18 +307,15 @@
   })();
 
   /*────────────────── SECTION 4: FONT PICKER ──────────────────*/
-  const FontPicker = (() => {
-    // Font data
+  const FontPicker = (() => {    // Font data
     const cats = [
-      { title:'Sans‑Serif', fonts:['Sans‑Serif','Poppins','Inter','Roboto','Open Sans','Lato','Source Sans Pro','Work Sans','DM Sans','Nunito','Quicksand'] },
-      { title:'Monospace',  fonts:['JetBrains Mono','Fira Code','Courier Prime','IBM Plex Mono','Victor Mono','Recursive Mono Casual'] },
-      { title:'Display / Stylized', fonts:['Bebas Neue','Oswald','Raleway','Playfair Display','Pacifico','Satisfy','Fredoka','Unica One'] },
-      { title:'Retro / Terminal', fonts:['VT323','Press Start 2P','Share Tech Mono','Major Mono Display','Monofett'] },
-      { title:'Chaotic / Handwritten', fonts:['Comic Neue','Papyrus','Impact','Caveat','Indie Flower','Amatic SC','Gloria Hallelujah'] },
-      { title:'Fantasy / Decorative', fonts:['Uncial Antiqua','Cinzel Decorative','IM Fell English','Cormorant Garamond','Spectral'] }
-    ];
-
-    const fmap = {
+      { title:'Sans‑Serif', fonts:['Sans‑Serif','Poppins','Inter','Roboto','Open Sans','Lato','Source Sans Pro','Work Sans','DM Sans','Nunito','Quicksand','Montserrat','Red Hat Display'] },
+      { title:'Monospace',  fonts:['JetBrains Mono','Fira Code','Courier Prime','IBM Plex Mono','Victor Mono','Recursive Mono Casual','Cascadia Code'] },
+      { title:'Display / Stylized', fonts:['Bebas Neue','Oswald','Raleway','Playfair Display','Pacifico','Satisfy','Fredoka','Unica One','Righteous'] },
+      { title:'Retro / Terminal', fonts:['VT323','Press Start 2P','Share Tech Mono','Major Mono Display','Courier New','Orbitron'] },
+      { title:'Chaotic / Handwritten', fonts:['Comic Neue','Papyrus','Impact','Caveat','Indie Flower','Amatic SC','Gloria Hallelujah','Kalam','Shadows Into Light'] },
+      { title:'Fantasy / Decorative', fonts:['Uncial Antiqua','Cinzel Decorative','IM Fell English','Cormorant Garamond','Spectral','Crimson Text'] }
+    ];const fmap = {
       'Sans‑Serif':'sans-serif',
       'Poppins':`'Poppins',sans-serif`,
       'Inter':`'Inter',sans-serif`,
@@ -330,12 +327,15 @@
       'DM Sans':`'DM Sans',sans-serif`,
       'Nunito':`'Nunito',sans-serif`,
       'Quicksand':`'Quicksand',sans-serif`,
+      'Montserrat':`'Montserrat',sans-serif`,
+      'Red Hat Display':`'Red Hat Display',sans-serif`,
       'JetBrains Mono':`'JetBrains Mono',monospace`,
       'Fira Code':`'Fira Code',monospace`,
       'Courier Prime':`'Courier Prime',monospace`,
       'IBM Plex Mono':`'IBM Plex Mono',monospace`,
       'Victor Mono':`'Victor Mono',monospace`,
       'Recursive Mono Casual':`'Recursive Mono Casual',monospace`,
+      'Cascadia Code':`'Cascadia Code',monospace`,
       'Bebas Neue':`'Bebas Neue',cursive`,
       'Oswald':`'Oswald',sans-serif`,
       'Raleway':`'Raleway',sans-serif`,
@@ -343,12 +343,13 @@
       'Pacifico':`'Pacifico',cursive`,
       'Satisfy':`'Satisfy',cursive`,
       'Fredoka':`'Fredoka',sans-serif`,
-      'Unica One':`'Unica One',cursive`,
+      'Unica One':`'Unica One',cursive`,      'Orbitron':`'Orbitron',sans-serif`,
+      'Righteous':`'Righteous',cursive`,
       'VT323':`'VT323',monospace`,
       'Press Start 2P':`'Press Start 2P',monospace`,
       'Share Tech Mono':`'Share Tech Mono',monospace`,
       'Major Mono Display':`'Major Mono Display',monospace`,
-      'Monofett':`'Monofett',cursive`,
+      'Courier New':'Courier New,monospace',
       'Comic Neue':`'Comic Neue',cursive`,
       'Papyrus':'Papyrus,fantasy',
       'Impact':'Impact,sans-serif',
@@ -356,20 +357,21 @@
       'Indie Flower':`'Indie Flower',cursive`,
       'Amatic SC':`'Amatic SC',cursive`,
       'Gloria Hallelujah':`'Gloria Hallelujah',cursive`,
+      'Kalam':`'Kalam',cursive`,
+      'Shadows Into Light':`'Shadows Into Light',cursive`,
       'Uncial Antiqua':`'Uncial Antiqua',cursive`,
       'Cinzel Decorative':`'Cinzel Decorative',cursive`,
       'IM Fell English':`'IM Fell English',serif`,
       'Cormorant Garamond':`'Cormorant Garamond',serif`,
-      'Spectral':`'Spectral',serif`
+      'Spectral':`'Spectral',serif`,
+      'Crimson Text':`'Crimson Text',serif`
     };
 
     const STAR='★', STAR_O='☆';
     let active = null;
-    let previewing = false;
-
-    // Load Google Fonts CSS
+    let previewing = false;    // Load Google Fonts CSS
     const googleList = Object.keys(fmap)
-      .filter(f=>!['Sans‑Serif','Papyrus','Impact'].includes(f))
+      .filter(f=>!['Sans‑Serif','Papyrus','Impact','Courier New'].includes(f))
       .map(f=>f.replace(/ /g,'+')).join('&family=');
 
     if (googleList) {
@@ -380,7 +382,7 @@
           style.textContent=css; document.head.appendChild(style);
         })
         .catch(err=>console.warn('Font CSS fetch failed:',err));
-    }    function waitForTray(callback) {
+    }function waitForTray(callback) {
       const checkForTray = () => {
         const tray = document.querySelector('.tray-controls');
         if (tray) {
@@ -422,38 +424,43 @@
       } else {
         setupObserver();
       }
-    }
-
-    function makeTrayButton(tray) {
-      const p=`<path d="M12 4v16"/><path d="M4 7V5a1 1 0 0 1 1-1h14a1 1 0 0 1 1 1v2"/><path d="M9 20h6"/>`;
-      const svg=cls=>`<svg xmlns="http://www.w3.org/2000/svg" class="${cls}" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">${p}</svg>`;
+    }    function makeTrayButton(tray) {
+      const iconPath=`<path d="M12 4v16"/><path d="M4 7V5a1 1 0 0 1 1-1h14a1 1 0 0 1 1 1v2"/><path d="M9 20h6"/>`;
+      const svg=`<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">${iconPath}</svg>`;
       const b=document.createElement('button'); 
       b.className='tab accessible-focus gm-font-tab'; 
       b.role='tab'; 
       b.title='Fonts';
-      b.innerHTML=svg('selected')+svg('unselected'); 
+      b.innerHTML=svg; 
       tray.appendChild(b); 
       return b;
-    }
-
-    function buildPanel() {
+    }function buildPanel() {
       const panel=document.createElement('div');
-      panel.style.cssText=`position:fixed;bottom:64px;left:12px;width:320px;max-height:400px;
+      panel.id='gm-font-panel';
+      panel.style.cssText=`position:fixed;bottom:64px;left:12px;width:380px;max-height:480px;
         overflow-y:auto;background:#fff;border:1px solid #cfcfcf;border-radius:8px;
-        box-shadow:0 6px 20px rgba(0,0,0,.18);padding:10px 12px;display:none;
+        box-shadow:0 6px 20px rgba(0,0,0,.18);padding:12px 16px;display:none;
         z-index:999999;color:#222;font:14px/1 sans-serif;`;
 
       // Top bar
       const bar=document.createElement('div'); 
-      bar.style='display:flex;gap:8px;margin-bottom:8px;';
+      bar.style='display:flex;gap:8px;margin-bottom:10px;';
       const search=document.createElement('input');
       search.placeholder='Search fonts…'; 
-      search.style='flex:1;padding:4px 6px;border:1px solid #bbb;border-radius:4px;';
-      const reset=document.createElement('button'); 
-      reset.innerHTML='🗑'; 
-      reset.title='Reset'; 
-      reset.style='border:none;background:transparent;font-size:18px;cursor:pointer;';
-      bar.append(search,reset); 
+      search.style='flex:1;padding:6px 8px;border:1px solid #bbb;border-radius:4px;font-size:14px;';
+      const reset=document.createElement('button');      reset.innerHTML='🗑'; 
+      reset.title='Reset to default font'; 
+      reset.style='border:none;background:transparent;font-size:20px;cursor:pointer;padding:4px;border-radius:4px;';
+      reset.onmouseenter=()=>reset.style.background='#f0f0f0';
+      reset.onmouseleave=()=>reset.style.background='transparent';
+      reset.onclick=()=>{
+        active=null;
+        setStyle(null);
+        chrome.storage.local.remove('gmFont');
+        buildList(search.value.trim().toLowerCase());
+        console.log('🗑 Font reset to default');
+      };
+      bar.append(search,reset);
       panel.appendChild(bar);
 
       // List container
@@ -487,19 +494,23 @@
           h.textContent=t;
           h.style='margin:10px 0 6px;font:700 13px sans-serif;color:#666;';
           return h;
-        };
-        const addRow=name=>{
+        };        const addRow=name=>{
           if(filter && !name.toLowerCase().includes(filter)) return;
           const row=document.createElement('div'); 
           row.tabIndex=0; 
           row.dataset.font=name;
+          const isSelected = active === name;
           row.style=`display:flex;align-items:center;justify-content:space-between;
-            font-family:${fmap[name]};padding:5px 8px;margin:2px 0;border-radius:6px;cursor:pointer;`;
-          const lab=document.createElement('span'); 
+            font-family:${fmap[name]};padding:8px 10px;margin:2px 0;border-radius:6px;cursor:pointer;
+            min-height:32px;max-height:32px;overflow:hidden;
+            background:${isSelected ? '#e3f2fd' : 'transparent'};
+            border:${isSelected ? '1px solid #2196f3' : '1px solid transparent'};`;          const lab=document.createElement('span'); 
           lab.textContent=name;
+          lab.className='font-preview';
+          lab.style='overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;';
           const star=document.createElement('span'); 
           star.textContent=favs.includes(name)?STAR:STAR_O;
-          star.style='margin-left:8px;cursor:pointer;color:#e0a800;'; 
+          star.style='margin-left:8px;cursor:pointer;color:#e0a800;font-size:16px;flex-shrink:0;'; 
           star.onclick=e=>{
             e.stopPropagation();
             toggleFav(name);
@@ -537,24 +548,35 @@
             cat.fonts.forEach(addRow);
           }
         });
-      }
-
-      function toggleFav(name){
+      }      function toggleFav(name){
         if(favs.includes(name)) favs=favs.filter(f=>f!==name);
         else {favs.unshift(name);favs=favs.slice(0,3);}
         chrome.storage.local.set({gmFav:favs}); 
         buildList(search.value.trim().toLowerCase());
       }
 
+      // Add event listener for rebuilding list when selection changes
+      panel.addEventListener('rebuildList', (e) => {
+        buildList(e.detail || '');
+      });
+
       document.body.appendChild(panel);
       return panel;
-    }
-
-    function applyFont(name){ 
+    }function applyFont(name){ 
       active=name; 
       previewing=false; 
       setStyle(name); 
-      chrome.storage.local.set({gmFont:name}); 
+      chrome.storage.local.set({gmFont:name});
+      // Update the panel if it exists to show new selection
+      const panel = document.getElementById('gm-font-panel');
+      if (panel) {
+        const search = panel.querySelector('input');
+        if (search) {
+          // Find the buildList function in the panel context and call it
+          const event = new CustomEvent('rebuildList', { detail: search.value.trim().toLowerCase() });
+          panel.dispatchEvent(event);
+        }
+      }
     }
 
     function tempApply(name){ 
@@ -565,16 +587,27 @@
     function restoreActive(){ 
       if(previewing) setStyle(active); 
       previewing=false; 
-    }
-
-    function setStyle(name){ 
+    }    function setStyle(name){ 
       let s=document.getElementById('gm-font-style'); 
       if(!s){
         s=document.createElement('style');
         s.id='gm-font-style';
         document.head.appendChild(s);
       } 
-      s.textContent=name?`body,textarea,input,.chat,.message,.message-text,*{font-family:${fmap[name]} !important;}`:''; 
+      
+      if (!name) {
+        s.textContent = '';
+      } else if (name === 'Press Start 2P') {
+        // Scale down Press Start 2P slightly for better readability
+        s.textContent = `
+          body,textarea,input,.chat,.message,.message-text,* {
+            font-family:${fmap[name]} !important;
+            font-size: 0.971em !important;
+          }
+        `;
+      } else {
+        s.textContent = `body,textarea,input,.chat,.message,.message-text,*{font-family:${fmap[name]} !important;}`;
+      }
     }
 
     function hide(p,b){
@@ -589,10 +622,44 @@
       if(open) p.querySelector('input').focus();
     }    // Initialize font picker safely
     const initializeFontPicker = () => {
-      waitForTray(tray=>{
+      // Load saved font and favorites immediately
+      chrome.storage.local.get(['gmFont', 'gmFav'], (res) => {
+        if (res.gmFont && fmap[res.gmFont]) {
+          active = res.gmFont;
+          setStyle(active);
+          console.log('✅ Restored saved font:', active);
+        }
+        if (res.gmFav) {
+          favs = res.gmFav;
+        }
+      });      waitForTray(tray=>{
         try {
           const btn = makeTrayButton(tray);
           const panel = buildPanel();
+            // Add hover effects for the font picker button
+          if (!document.getElementById('gm-font-button-styles')) {
+            const buttonStyles = document.createElement('style');
+            buttonStyles.id = 'gm-font-button-styles';
+            buttonStyles.textContent = `
+              .gm-font-tab {
+                transition: all 0.2s ease;
+              }
+              .gm-font-tab:hover,
+              .gm-font-tab.active {
+                filter: drop-shadow(0 0 8px rgba(255, 255, 255, 0.4));
+              }
+              .gm-font-tab:hover svg,
+              .gm-font-tab.active svg {
+                filter: drop-shadow(0 0 4px rgba(255, 255, 255, 0.3));
+              }
+              /* Reduce Press Start 2P font size */
+              [data-font="Press Start 2P"] .font-preview {
+                font-size: 11px !important;
+              }
+            `;
+            document.head.appendChild(buttonStyles);
+          }
+          
           btn.onclick = ()=>togglePanel(panel,btn);
           document.addEventListener('click',e=>{
             if(!panel.contains(e.target)&&!btn.contains(e.target)) hide(panel,btn);
@@ -600,14 +667,18 @@
           document.addEventListener('keydown',e=>{ 
             if(e.key==='Escape') hide(panel,btn);
           });
+          
+          // Re-apply saved font after panel is built (in case DOM changed)
+          if (active) {
+            setTimeout(() => setStyle(active), 500);
+          }
+          
           console.log('✅ Font picker initialized');
         } catch (error) {
           console.error('❌ Error initializing font picker:', error);
         }
       });
-    };
-
-    // Delay initialization to ensure DOM is ready
+    };    // Delay initialization to ensure DOM is ready
     if (document.readyState === 'loading') {
       document.addEventListener('DOMContentLoaded', () => {
         setTimeout(initializeFontPicker, 1000);
@@ -615,6 +686,17 @@
     } else {
       setTimeout(initializeFontPicker, 1000);
     }
+
+    // Periodic font persistence check to prevent random resets
+    setInterval(() => {
+      if (active) {
+        const styleEl = document.getElementById('gm-font-style');
+        if (!styleEl || !styleEl.textContent.includes(fmap[active])) {
+          console.log('🔄 Font style lost, reapplying:', active);
+          setStyle(active);
+        }
+      }
+    }, 5000); // Check every 5 seconds
 
     return { applyFont, setStyle };
   })();

@@ -12,11 +12,10 @@
     "https://web.groupme.com/*",
     "https://api.groupme.com/*",
     "https://fonts.googleapis.com/*"
-  ],
-  "content_scripts": [
+  ],  "content_scripts": [
     {
       "matches": ["https://web.groupme.com/*"],
-      "js": ["lz-string.min.js", "groupme-ultimate.js"],
+      "js": ["lz-string.min.js", "groupme-plus.js"],
       "run_at": "document_start"
     }
   ],
