@@ -1,0 +1,29 @@
+{
+  "manifest_version": 3,
+  "name": "GroupMe Plus",
+  "version": "2.0",
+  "description": "The ultimate GroupMe extension with font picker, message caching, and message counting.",
+  "icons": {
+    "48": "icon48.png",
+    "128": "icon128.png"
+  },
+  "permissions": ["storage"],
+  "host_permissions": [
+    "https://web.groupme.com/*",
+    "https://api.groupme.com/*",
+    "https://fonts.googleapis.com/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["https://web.groupme.com/*"],
+      "js": ["lz-string.min.js", "groupme-ultimate.js"],
+      "run_at": "document_start"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["page-inject.js"],
+      "matches": ["https://web.groupme.com/*"]
+    }
+  ]
+}
