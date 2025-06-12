@@ -1,9 +1,9 @@
-// GroupMe Ultimate Extension - Combined Font Picker, Message Cacher, and Message Counter
+// GroupMe Plus Extension - Combined Font Picker, Message Cacher, and Message Counter
 // Version 2.0
 (() => {
   'use strict';
-  
-  console.log('🚀 GroupMe Ultimate Extension - Loading...');
+
+  console.log('🚀 GroupMe Plus Extension - Loading...');
 
   /*────────────────── SECTION 1: PAGE INJECTION ──────────────────*/
   // Inject page-inject.js into the page context for API interception
@@ -12,146 +12,775 @@
     s.src = chrome.runtime.getURL('page-inject.js');
     s.onload = () => s.remove();
     (document.documentElement || document.head).appendChild(s);
-  }
+  } 
 
   // Ensure LZString is available for message caching
   if (!('LZString' in window)) {
-    console.warn('[GroupMe Ultimate] LZString not found; message caching disabled.');
+    console.warn('[GroupMe Plus] LZString not found; message caching disabled.');
   }
-
-  /*────────────────── SECTION 2: MESSAGE CACHING ──────────────────*/
+  /*────────────────── SECTION 2: ADVANCED MESSAGE CACHING ──────────────────*/
   const MessageCache = (() => {
     if (!window.LZString) {
-      console.warn('[GroupMe Ultimate] LZString not available, message caching disabled');
+      console.warn('[GroupMe Plus] LZString not available, message caching disabled');
       return null;
     }
 
+    // Enhanced database layer with better error handling and versioning
     const DB = (() => {
-      const NAME = 'GMCache', STORE = 'msgs';
-      let dbp;
+      const NAME = 'GMCache';
+      const VERSION = 2;
+      const STORES = {
+        messages: 'messages',
+        editHistory: 'editHistory',
+        metadata: 'metadata'
+      };
+      let dbPromise = null;
 
       function open() {
-        if (dbp) return dbp;
-        dbp = new Promise((resolve, reject) => {
-          const req = indexedDB.open(NAME, 1);
-          req.onupgradeneeded = e => e.target.result.createObjectStore(STORE, { keyPath: 'id' });
-          req.onsuccess = e => resolve(e.target.result);
-          req.onerror = e => reject(e.target.error);
-        });
-        return dbp;
-      }
-
-      async function putMany(objs) {
-        const db = await open();
-        const tx = db.transaction(STORE, 'readwrite');
-        const store = tx.objectStore(STORE);
-        Object.values(objs).forEach(o => store.put(o));
-        return tx.complete ?? new Promise((res, rej) => {
-          tx.oncomplete = res;
-          tx.onerror = e => rej(e.target.error);
-        });
-      }
-
-      async function count() {
-        const db = await open();
-        return new Promise((res, rej) => {
-          const r = db.transaction(STORE).objectStore(STORE).count();
-          r.onsuccess = () => res(r.result);
-          r.onerror = e => rej(e.target.error);
-        });
-      }
-
-      function firstValidSample() {
-        return open().then(db => new Promise((res, rej) => {
-          const c = db.transaction(STORE).objectStore(STORE).openCursor();
-          c.onsuccess = e => {
-            const cur = e.target.result;
-            if (!cur) return res(null);
-            const v = cur.value;
-            if (v?.d) {
-              try {
-                const json = LZString.decompressFromUTF16(v.d);
-                return res(JSON.parse(json));
-              } catch {/* keep looking */}
+        if (dbPromise) return dbPromise;
+        
+        dbPromise = new Promise((resolve, reject) => {
+          const req = indexedDB.open(NAME, VERSION);
+          
+          req.onupgradeneeded = (e) => {
+            const db = e.target.result;
+            const oldVersion = e.oldVersion;
+            
+            console.log(`📊 Upgrading database from v${oldVersion} to v${VERSION}`);
+            
+            // Create messages store with compound index
+            if (!db.objectStoreNames.contains(STORES.messages)) {
+              const msgStore = db.createObjectStore(STORES.messages, { keyPath: 'id' });
+              msgStore.createIndex('group_id', 'group_id', { unique: false });
+              msgStore.createIndex('timestamp', 'timestamp', { unique: false });
+              msgStore.createIndex('user_id', 'user_id', { unique: false });
+              msgStore.createIndex('group_timestamp', ['group_id', 'timestamp'], { unique: false });
             }
-            cur.continue();
+            
+            // Create edit history store  
+            if (!db.objectStoreNames.contains(STORES.editHistory)) {
+              const editStore = db.createObjectStore(STORES.editHistory, { keyPath: 'edit_id' });
+              editStore.createIndex('message_id', 'message_id', { unique: false });
+              editStore.createIndex('edit_timestamp', 'edit_timestamp', { unique: false });
+            }
+            
+            // Create metadata store for tracking stats
+            if (!db.objectStoreNames.contains(STORES.metadata)) {
+              db.createObjectStore(STORES.metadata, { keyPath: 'key' });
+            }
           };
-          c.onerror = e => rej(e.target.error);
-        }));
-      }
-
-      async function all() {
-        const db = await open();
-        return new Promise((res, rej) => {
-          const out = [];
-          const c = db.transaction(STORE).objectStore(STORE).openCursor();
-          c.onsuccess = e => {
-            const cur = e.target.result;
-            if (!cur) return res(out);
-            try {
-              const raw = LZString.decompressFromUTF16(cur.value.d);
-              out.push(JSON.parse(raw));
-            } catch {/* ignore bad records */}
-            cur.continue();
+          
+          req.onsuccess = (e) => {
+            const db = e.target.result;
+            db.onerror = (err) => console.error('💥 Database error:', err);
+            resolve(db);
           };
-          c.onerror = e => rej(e.target.error);
+          
+          req.onerror = (e) => {
+            console.error('💥 Failed to open database:', e.target.error);
+            reject(e.target.error);
+          };
+          
+          req.onblocked = () => {
+            console.warn('🚫 Database upgrade blocked - close other tabs');
+            reject(new Error('Database upgrade blocked'));
+          };
         });
+        
+        return dbPromise;
+      }      // Enhanced message storage with strict deduplication
+      async function storeMessages(messages) {
+        if (!messages || !Object.keys(messages).length) return;
+        
+        try {
+          const db = await open();
+          const tx = db.transaction([STORES.messages], 'readwrite');
+          const store = tx.objectStore(STORES.messages);
+          
+          let stored = 0, updated = 0, skipped = 0;
+          const processedIds = new Set();
+          
+          for (const [key, rawMsg] of Object.entries(messages)) {
+            try {
+              // Skip messages without proper IDs or with generated IDs
+              if (!rawMsg.id || typeof rawMsg.id !== 'string' || rawMsg.id.includes('.')) {
+                console.warn(`⚠️ Skipping message with invalid ID: ${rawMsg.id}`);
+                skipped++;
+                continue;
+              }
+              
+              const messageId = rawMsg.id;
+              
+              // Skip if we've already processed this ID in this batch
+              if (processedIds.has(messageId)) {
+                console.warn(`⚠️ Duplicate message ID in batch: ${messageId}`);
+                skipped++;
+                continue;
+              }
+              processedIds.add(messageId);
+              
+              // Skip DOM-extracted messages if they lack essential data
+              if (rawMsg.dom_extracted && (!rawMsg.text || rawMsg.name === 'Unknown')) {
+                console.warn(`⚠️ Skipping invalid DOM-extracted message: ${messageId}`);
+                skipped++;
+                continue;
+              }
+              
+              // Check if message already exists
+              const existing = await new Promise((resolve, reject) => {
+                const req = store.get(messageId);
+                req.onsuccess = () => resolve(req.result);
+                req.onerror = () => reject(req.error);
+              });
+                const processedMsg = processMessage(rawMsg);
+              processedMsg.id = messageId;
+              processedMsg.cached_at = Date.now();
+              
+              // Compress the message for storage
+              const compressedMsg = compressMessageForStorage(processedMsg);
+              
+              if (existing) {
+                // Decompress existing message to check for edits
+                const existingData = decompressMessageFromStorage(existing);
+                if (!existingData) {
+                  console.warn(`⚠️ Failed to decompress existing message: ${messageId}`);
+                  skipped++;
+                  continue;
+                }
+                
+                // Only update if this is a more complete version or there's an actual edit
+                const hasMoreData = (!existingData.name || existingData.name === 'Unknown') && processedMsg.name && processedMsg.name !== 'Unknown';
+                const isEdit = existingData.text !== processedMsg.text && existingData.text && processedMsg.text && existingData.text.length > 0 && processedMsg.text.length > 0;
+                
+                if (isEdit) {
+                  await storeEditHistory(messageId, existingData.text, processedMsg.text);
+                  console.log(`📝 Edit detected for message ${messageId}`);
+                  
+                  // Update with edit info, preserving original cached_at
+                  processedMsg.cached_at = existingData.cached_at;
+                  processedMsg.last_updated = Date.now();
+                  const updatedCompressed = compressMessageForStorage(processedMsg);
+                  updated++;
+                  
+                  await new Promise((resolve, reject) => {
+                    const req = store.put(updatedCompressed);
+                    req.onsuccess = () => resolve();
+                    req.onerror = () => reject(req.error);
+                  });
+                } else if (hasMoreData) {
+                  // Update with more complete data, preserving original text and cached_at
+                  processedMsg.cached_at = existingData.cached_at;
+                  processedMsg.last_updated = Date.now();
+                  processedMsg.text = existingData.text; // Keep original text
+                  const updatedCompressed = compressMessageForStorage(processedMsg);
+                  updated++;
+                  
+                  await new Promise((resolve, reject) => {
+                    const req = store.put(updatedCompressed);
+                    req.onsuccess = () => resolve();
+                    req.onerror = () => reject(req.error);
+                  });
+                } else {
+                  // Skip duplicate
+                  skipped++;
+                  continue;
+                }
+              } else {
+                stored++;
+                
+                await new Promise((resolve, reject) => {
+                  const req = store.put(compressedMsg);
+                  req.onsuccess = () => resolve();
+                  req.onerror = () => reject(req.error);
+                });
+              }
+              
+            } catch (err) {
+              console.warn(`⚠️ Failed to store message ${key}:`, err);
+              skipped++;
+            }
+          }
+          
+          await new Promise((resolve, reject) => {
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => reject(tx.error);
+          });
+          
+          if (stored > 0 || updated > 0) {
+            console.log(`✅ Message storage: ${stored} new, ${updated} updated, ${skipped} skipped`);
+          }
+          
+          // Update metadata
+          await updateMetadata('last_cache_operation', {
+            timestamp: Date.now(),
+            stored,
+            updated,
+            skipped
+          });
+          
+        } catch (err) {
+          console.error('💥 Failed to store messages:', err);
+          throw err;
+        }
       }
 
-      return { putMany, count, firstValidSample, all };
-    })();
-
-    // Listen for batches from the page
-    window.addEventListener('message', e => {
-      if (e.source !== window || e.data?.type !== 'GM_MESSAGES') return;
-      const batch = {};
-      for (const id in e.data.payload) {
-        const m = e.data.payload[id];
-        const slim = {
-          i: m.id,
-          g: m.group_id,
-          t: m.text,
-          c: m.created_at,
-          u: m.sender_id,
-          n: m.name
+      // Store edit history
+      async function storeEditHistory(messageId, originalText, newText) {
+        try {
+          const db = await open();
+          const tx = db.transaction([STORES.editHistory], 'readwrite');
+          const store = tx.objectStore(STORES.editHistory);
+          
+          const editRecord = {
+            edit_id: `${messageId}_${Date.now()}`,
+            message_id: messageId,
+            original_text: originalText,
+            new_text: newText,
+            edit_timestamp: Date.now(),
+            detected_at: new Date().toISOString()
+          };
+          
+          await new Promise((resolve, reject) => {
+            const req = store.add(editRecord);
+            req.onsuccess = () => resolve();
+            req.onerror = () => reject(req.error);
+          });
+          
+        } catch (err) {
+          console.error('💥 Failed to store edit history:', err);
+        }
+      }      // Process and optimize message data with compression
+      function processMessage(rawMsg) {
+        const msg = {
+          id: rawMsg.id,
+          group_id: rawMsg.group_id,
+          text: rawMsg.text || '',
+          timestamp: new Date(rawMsg.created_at).getTime(),
+          created_at: rawMsg.created_at,
+          user_id: rawMsg.user_id || rawMsg.sender_id,
+          name: rawMsg.name,
+          avatar_url: rawMsg.avatar_url
         };
-        if (m.attachments?.length) slim.a = m.attachments;
-        if (m.favorited_by?.length) slim.f = m.favorited_by;
-        if (m.is_dm) slim.dm = true;
-        if (m.dm_other_user_id) slim.dmu = m.dm_other_user_id;
-        batch[id] = { id, d: LZString.compressToUTF16(JSON.stringify(slim)) };
+        
+        // Optional fields
+        if (rawMsg.attachments?.length) msg.attachments = rawMsg.attachments;
+        if (rawMsg.favorited_by?.length) msg.favorited_by = rawMsg.favorited_by;
+        if (rawMsg.is_dm) msg.is_dm = true;
+        if (rawMsg.dm_other_user_id) msg.dm_other_user_id = rawMsg.dm_other_user_id;
+        if (rawMsg.system) msg.system = true;
+        if (rawMsg.event) msg.event = rawMsg.event;
+        
+        return msg;
       }
-      DB.putMany(batch).then(() =>
-        console.log('✅ Cached', Object.keys(batch).length, 'messages → IndexedDB')
-      );
+
+      // Compress message data for storage
+      function compressMessageForStorage(messageData) {
+        try {
+          const jsonString = JSON.stringify(messageData);
+          const compressed = LZString.compressToUTF16(jsonString);
+          return {
+            id: messageData.id,
+            data: compressed,
+            compressed: true,
+            stored_at: Date.now()
+          };
+        } catch (err) {
+          console.warn('Failed to compress message, storing uncompressed:', err);
+          return {
+            id: messageData.id,
+            data: messageData,
+            compressed: false,
+            stored_at: Date.now()
+          };
+        }
+      }
+
+      // Decompress message data from storage
+      function decompressMessageFromStorage(storedData) {
+        try {
+          if (!storedData.compressed) {
+            // Already uncompressed (fallback case)
+            return storedData.data;
+          }
+          
+          const decompressed = LZString.decompressFromUTF16(storedData.data);
+          if (!decompressed) {
+            console.warn('Failed to decompress message data for ID:', storedData.id);
+            return null;
+          }
+          
+          return JSON.parse(decompressed);
+        } catch (err) {
+          console.warn('Failed to decompress message:', err);
+          return null;
+        }
+      }
+
+      // Update metadata
+      async function updateMetadata(key, value) {
+        try {
+          const db = await open();
+          const tx = db.transaction([STORES.metadata], 'readwrite');
+          const store = tx.objectStore(STORES.metadata);
+          
+          await new Promise((resolve, reject) => {
+            const req = store.put({ key, value, updated_at: Date.now() });
+            req.onsuccess = () => resolve();
+            req.onerror = () => reject(req.error);
+          });
+        } catch (err) {
+          console.warn('Failed to update metadata:', err);
+        }
+      }
+
+      // Get statistics
+      async function getStats() {
+        try {
+          const db = await open();
+          const msgTx = db.transaction([STORES.messages], 'readonly');
+          const editTx = db.transaction([STORES.editHistory], 'readonly');
+          
+          const [messageCount, editCount] = await Promise.all([
+            new Promise((resolve, reject) => {
+              const req = msgTx.objectStore(STORES.messages).count();
+              req.onsuccess = () => resolve(req.result);
+              req.onerror = () => reject(req.error);
+            }),
+            new Promise((resolve, reject) => {
+              const req = editTx.objectStore(STORES.editHistory).count();
+              req.onsuccess = () => resolve(req.result);
+              req.onerror = () => reject(req.error);
+            })
+          ]);
+          
+          return { messageCount, editCount };
+        } catch (err) {
+          console.error('Failed to get stats:', err);
+          return { messageCount: 0, editCount: 0 };
+        }
+      }      // Export functions with decompression
+      async function getAllMessages() {
+        try {
+          const db = await open();
+          const tx = db.transaction([STORES.messages], 'readonly');
+          const store = tx.objectStore(STORES.messages);
+          
+          return new Promise((resolve, reject) => {
+            const messages = [];
+            const req = store.openCursor();
+            
+            req.onsuccess = (e) => {
+              const cursor = e.target.result;
+              if (!cursor) return resolve(messages);
+              
+              // Decompress the message data
+              const decompressed = decompressMessageFromStorage(cursor.value);
+              if (decompressed) {
+                messages.push(decompressed);
+              } else {
+                console.warn('Failed to decompress message, skipping:', cursor.value.id);
+              }
+              
+              cursor.continue();
+            };
+            
+            req.onerror = () => reject(req.error);
+          });
+        } catch (err) {          console.error('Failed to get all messages:', err);
+          return [];
+        }
+      }
+
+      async function getEditHistory() {
+        try {
+          const db = await open();
+          const tx = db.transaction([STORES.editHistory], 'readonly');
+          const store = tx.objectStore(STORES.editHistory);
+          
+          return new Promise((resolve, reject) => {
+            const edits = [];
+            const req = store.openCursor();
+            
+            req.onsuccess = (e) => {
+              const cursor = e.target.result;
+              if (!cursor) return resolve(edits);
+              edits.push(cursor.value);
+              cursor.continue();
+            };
+            
+            req.onerror = () => reject(req.error);
+          });
+        } catch (err) {
+          console.error('Failed to get edit history:', err);
+          return [];
+        }
+      }      return { 
+        storeMessages, 
+        getStats, 
+        getAllMessages, 
+        getEditHistory,
+        updateMetadata,
+        decompressMessageFromStorage,
+        open
+      };
+    })();    // Live message monitoring - Conservative approach
+    const LiveMonitor = (() => {
+      let isMonitoring = false;
+      let messageObserver = null;
+      let lastProcessedMessages = new Set();
+      let domExtractionEnabled = false; // Disabled by default due to reliability issues
+
+      function startMonitoring() {
+        if (isMonitoring) return;
+        isMonitoring = true;
+        
+        console.log('🔍 Starting live message monitoring (API + WebSocket only)...');
+        
+        // Only setup WebSocket monitoring by default
+        setupRealtimeMonitoring();
+        
+        // DOM monitoring is disabled by default due to duplication issues
+        // Can be enabled via debug interface if needed
+        if (domExtractionEnabled) {
+          setupDOMObserver();
+        }
+      }
+
+      function setupDOMObserver() {
+        console.warn('⚠️ DOM extraction enabled - this may cause duplicates');
+        
+        if (messageObserver) messageObserver.disconnect();
+        
+        messageObserver = new MutationObserver((mutations) => {
+          // Only process if we have very few mutations to avoid spam
+          if (mutations.length > 5) {
+            console.warn('⚠️ Too many DOM mutations, skipping to avoid spam');
+            return;
+          }
+          
+          const newMessages = [];
+          
+          mutations.forEach((mutation) => {
+            mutation.addedNodes.forEach((node) => {
+              if (node.nodeType === Node.ELEMENT_NODE) {
+                // Be very specific about what we consider a message element
+                const messageElements = node.querySelectorAll ? 
+                  [...node.querySelectorAll('[data-id][data-created-at], .message[data-id]')] : 
+                  [];
+                
+                messageElements.forEach(el => {
+                  const messageData = extractMessageFromDOM(el);
+                  if (messageData && messageData.id && !messageData.id.includes('.') && !lastProcessedMessages.has(messageData.id)) {
+                    newMessages.push(messageData);
+                    lastProcessedMessages.add(messageData.id);
+                  }
+                });
+              }
+            });
+          });
+          
+          if (newMessages.length > 0 && newMessages.length < 10) { // Sanity check
+            console.log(`📨 DOM captured ${newMessages.length} new messages`);
+            const batch = {};
+            newMessages.forEach(msg => {
+              batch[`msg-${msg.id}`] = msg;
+            });
+            DB.storeMessages(batch);
+          }
+        });
+        
+        // Start observing with more restrictive options
+        const targetNode = document.querySelector('[data-testid="chat-container"], .chat-container, .messages-container') || document.body;
+        if (targetNode) {
+          messageObserver.observe(targetNode, {
+            childList: true,
+            subtree: true,
+            attributes: false
+          });
+        }
+      }
+
+      function extractMessageFromDOM(element) {
+        try {
+          // Only extract if we have a real message ID from the DOM
+          const messageId = element.getAttribute('data-id') || element.getAttribute('data-message-id');
+          if (!messageId || messageId.includes('.') || messageId.length < 10) {
+            return null; // Skip if no proper ID
+          }
+          
+          const textElement = element.querySelector('[class*="text"], .message-text, [data-testid*="text"]');
+          const authorElement = element.querySelector('[class*="author"], .message-author, [data-testid*="author"]');
+          const timeElement = element.querySelector('[class*="time"], .message-time, [data-testid*="time"], [data-created-at]');
+          
+          if (!textElement || !authorElement) return null; // Must have text and author
+          
+          const text = textElement.textContent?.trim();
+          const name = authorElement.textContent?.trim();
+          
+          if (!text || !name || name === 'Unknown' || text.length < 1) {
+            return null; // Skip incomplete messages
+          }
+          
+          return {
+            id: messageId,
+            text: text,
+            name: name,
+            created_at: timeElement?.getAttribute('data-created-at') || 
+                        timeElement?.getAttribute('datetime') || 
+                        new Date().toISOString(),
+            captured_live: true,
+            dom_extracted: true,
+            user_id: element.getAttribute('data-user-id') || 'unknown'
+          };
+        } catch (err) {
+          console.warn('Failed to extract message from DOM:', err);
+          return null;
+        }
+      }
+
+      function setupRealtimeMonitoring() {
+        // Hook into WebSocket connections for real-time message capture
+        const originalWebSocket = window.WebSocket;
+        window.WebSocket = function(...args) {
+          const ws = new originalWebSocket(...args);
+          
+          const originalOnMessage = ws.onmessage;
+          ws.onmessage = function(event) {
+            try {
+              const data = JSON.parse(event.data);
+              if (data && (data.type === 'message' || data.message) && data.id) {
+                console.log('📡 Real-time message detected via WebSocket');
+                const message = data.message || data;
+                if (message.id && !message.id.includes('.')) {
+                  const batch = { [`msg-${message.id}`]: message };
+                  DB.storeMessages(batch);
+                }
+              }
+            } catch (err) {
+              // Not JSON or not a message, ignore
+            }
+            
+            if (originalOnMessage) {
+              return originalOnMessage.apply(this, arguments);
+            }
+          };
+          
+          return ws;
+        };
+      }
+
+      function stopMonitoring() {
+        isMonitoring = false;
+        if (messageObserver) {
+          messageObserver.disconnect();
+          messageObserver = null;
+        }
+        console.log('⏹️ Live message monitoring stopped');
+      }
+
+      function enableDOMExtraction() {
+        domExtractionEnabled = true;
+        if (isMonitoring) {
+          setupDOMObserver();
+        }
+        console.log('⚠️ DOM extraction enabled - monitor for duplicates');
+      }
+
+      function disableDOMExtraction() {
+        domExtractionEnabled = false;
+        if (messageObserver) {
+          messageObserver.disconnect();
+          messageObserver = null;
+        }
+        console.log('✅ DOM extraction disabled');
+      }
+
+      return { 
+        startMonitoring, 
+        stopMonitoring, 
+        enableDOMExtraction,
+        disableDOMExtraction,
+        isMonitoring: () => isMonitoring,
+        isDOMEnabled: () => domExtractionEnabled
+      };
+    })();    // Listen for API-intercepted messages with enhanced feedback
+    window.addEventListener('message', (e) => {
+      if (e.source !== window || e.data?.type !== 'GM_MESSAGES') return;
+      
+      const metadata = e.data.metadata || {};
+      const payloadSize = Object.keys(e.data.payload).length;
+      
+      if (payloadSize > 0) {
+        console.log(`📥 Received batch: ${metadata.new_count || 0} new, ${metadata.edit_count || 0} edited, ${metadata.skipped_count || 0} skipped from ${metadata.source || 'unknown'}`);
+      }
+      
+      // Show warning if too many duplicates detected
+      if (metadata.skipped_count > 50) {
+        console.warn(`⚠️ High duplicate rate detected (${metadata.skipped_count} skipped). Consider clearing cache or checking for issues.`);
+      }
+      
+      DB.storeMessages(e.data.payload);
     });
 
-    // CSV export helper
-    function toCsv(rows) {
-      const esc = s => '"' + (s?.toString().replace(/"/g, '""') ?? '') + '"';
-      const header = ['id','group','text','created_at','sender_id','name','attachments','favorited_by','is_dm','dm_other_user'];
-      const lines = rows.map(r => [
-        esc(r.i), esc(r.g), esc(r.t), esc(r.c), esc(r.u), esc(r.n),
-        esc(r.a ? JSON.stringify(r.a) : ''),
-        esc(r.f ? JSON.stringify(r.f) : ''),
-        esc(r.dm ? 'true' : 'false'),
-        esc(r.dmu || '')
+    // Enhanced CSV export with edit history
+    async function exportData(format = 'csv') {
+      try {
+        const [messages, edits] = await Promise.all([
+          DB.getAllMessages(),
+          DB.getEditHistory()
+        ]);
+        
+        if (!messages.length) {
+          alert('No messages cached yet.');
+          return;
+        }
+        
+        if (format === 'csv') {
+          await exportCSV(messages, edits);
+        } else if (format === 'json') {
+          await exportJSON(messages, edits);
+        }
+      } catch (err) {
+        console.error('Export failed:', err);
+        alert('Export failed: ' + err.message);
+      }
+    }
+
+    async function exportCSV(messages, edits) {
+      const escapeCSV = (str) => `"${(str || '').toString().replace(/"/g, '""')}"`;
+      
+      // Export messages
+      const msgHeaders = ['id', 'group_id', 'text', 'created_at', 'user_id', 'name', 'is_dm', 'cached_at', 'last_updated'];
+      const msgRows = messages.map(msg => [
+        escapeCSV(msg.id),
+        escapeCSV(msg.group_id || ''),
+        escapeCSV(msg.text || ''),
+        escapeCSV(msg.created_at || ''),
+        escapeCSV(msg.user_id || ''),
+        escapeCSV(msg.name || ''),
+        escapeCSV(msg.is_dm ? 'true' : 'false'),
+        escapeCSV(new Date(msg.cached_at).toISOString()),
+        escapeCSV(msg.last_updated ? new Date(msg.last_updated).toISOString() : '')
       ].join(','));
-      return [header.join(','), ...lines].join('\r\n');
+      
+      const messagesCSV = [msgHeaders.join(','), ...msgRows].join('\r\n');
+      
+      // Export edit history if exists
+      let editsCSV = '';
+      if (edits.length > 0) {
+        const editHeaders = ['edit_id', 'message_id', 'original_text', 'new_text', 'edit_timestamp', 'detected_at'];
+        const editRows = edits.map(edit => [
+          escapeCSV(edit.edit_id),
+          escapeCSV(edit.message_id),
+          escapeCSV(edit.original_text || ''),
+          escapeCSV(edit.new_text || ''),
+          escapeCSV(edit.edit_timestamp),
+          escapeCSV(edit.detected_at)
+        ].join(','));
+        
+        editsCSV = [editHeaders.join(','), ...editRows].join('\r\n');
+      }
+      
+      // Create ZIP file with both CSV files
+      const timestamp = new Date().toISOString().slice(0, 19).replace(/:/g, '-');
+      
+      if (editsCSV) {
+        // If we have edit history, create a ZIP
+        const JSZip = await loadJSZip();
+        if (JSZip) {
+          const zip = new JSZip();
+          zip.file(`groupme_messages_${timestamp}.csv`, messagesCSV);
+          zip.file(`groupme_edits_${timestamp}.csv`, editsCSV);
+          
+          const blob = await zip.generateAsync({ type: 'blob' });
+          downloadBlob(blob, `groupme_export_${timestamp}.zip`);
+        } else {
+          // Fallback to just messages CSV
+          downloadBlob(new Blob([messagesCSV], { type: 'text/csv' }), `groupme_messages_${timestamp}.csv`);
+        }
+      } else {
+        downloadBlob(new Blob([messagesCSV], { type: 'text/csv' }), `groupme_messages_${timestamp}.csv`);
+      }
     }
 
-    async function exportCsv() {
-      const allRaw = await DB.all();
-      const msgs = allRaw.filter(r => r && r.i !== undefined);
-      if (!msgs.length) return alert('No messages cached yet.');
-      const csv = toCsv(msgs);
-      const blobUrl = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
-      const a = document.createElement('a'); a.href = blobUrl;
-      a.download = `groupme_messages_${Date.now()}.csv`;
-      a.click(); URL.revokeObjectURL(blobUrl);
+    async function exportJSON(messages, edits) {
+      const data = {
+        export_info: {
+          timestamp: new Date().toISOString(),
+          version: '2.0',
+          message_count: messages.length,
+          edit_count: edits.length
+        },
+        messages,
+        edit_history: edits
+      };
+      
+      const json = JSON.stringify(data, null, 2);
+      const timestamp = new Date().toISOString().slice(0, 19).replace(/:/g, '-');
+      downloadBlob(new Blob([json], { type: 'application/json' }), `groupme_export_${timestamp}.json`);
     }
 
-    return { DB, exportCsv };
+    function downloadBlob(blob, filename) {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }
+
+    // Try to load JSZip for advanced exports
+    async function loadJSZip() {
+      try {
+        if (window.JSZip) return window.JSZip;
+        
+        // Try to load JSZip from CDN
+        return new Promise((resolve) => {
+          const script = document.createElement('script');
+          script.src = 'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js';
+          script.onload = () => resolve(window.JSZip);
+          script.onerror = () => resolve(null);
+          document.head.appendChild(script);
+        });
+      } catch {
+        return null;
+      }
+    }
+
+    // Initialize the cache system
+    function initialize() {
+      console.log('🚀 Initializing Advanced Message Cache...');
+      
+      // Start live monitoring
+      LiveMonitor.startMonitoring();
+      
+      // Set up periodic cleanup and optimization
+      setInterval(async () => {
+        try {
+          const stats = await DB.getStats();
+          console.log(`📊 Cache stats: ${stats.messageCount} messages, ${stats.editCount} edits`);
+        } catch (err) {
+          console.warn('Failed to get cache stats:', err);
+        }
+      }, 60000); // Every minute
+    }
+
+    // Auto-initialize
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', initialize);
+    } else {
+      setTimeout(initialize, 1000);
+    }
+
+    return { 
+      DB, 
+      LiveMonitor, 
+      exportData,
+      getStats: DB.getStats,
+      initialize
+    };
   })();
 
   /*────────────────── SECTION 3: MESSAGE COUNTER ──────────────────*/
@@ -700,51 +1329,509 @@
 
     return { applyFont, setStyle };
   })();
+  /*────────────────── SECTION 5: ENHANCED UI CONTROLS ──────────────────*/
+  const UIControls = (() => {
+    const BTN_STYLE = {
+      position: 'fixed', 
+      right: '10px', 
+      zIndex: 99999,
+      background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)', 
+      color: '#fff', 
+      padding: '10px 14px',
+      border: 'none', 
+      borderRadius: '8px', 
+      cursor: 'pointer',
+      fontSize: '13px',
+      fontWeight: '600',
+      boxShadow: '0 4px 12px rgba(0,0,0,0.15)',
+      transition: 'all 0.2s ease',
+      fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif'
+    };
 
-  /*────────────────── SECTION 5: UI BUTTONS ──────────────────*/
-  const BTN_STYLE = {
-    position: 'fixed', 
-    right: '10px', 
-    zIndex: 99999,
-    background: '#333', 
-    color: '#fff', 
-    padding: '8px',
-    border: 'none', 
-    borderRadius: '4px', 
-    cursor: 'pointer',
-    fontSize: '13px'
-  };
-
-  function makeBtn(label, topPx, handler) {
-    const btn = document.createElement('button');
-    btn.textContent = label;
-    btn.onclick = handler;
-    Object.assign(btn.style, BTN_STYLE, { top: `${topPx}px` });
-    document.body.appendChild(btn);
-  }
-
-  function addButtons() {
-    if (!MessageCache) {
-      console.log('Message caching not available - buttons disabled');
-      return;
+    function createButton(label, topPx, handler, icon = '') {
+      const btn = document.createElement('button');
+      btn.innerHTML = `${icon} ${label}`.trim();
+      btn.onclick = handler;
+      
+      Object.assign(btn.style, BTN_STYLE, { top: `${topPx}px` });
+      
+      // Add hover effects
+      btn.onmouseenter = () => {
+        btn.style.transform = 'translateY(-2px)';
+        btn.style.boxShadow = '0 6px 16px rgba(0,0,0,0.2)';
+      };
+      btn.onmouseleave = () => {
+        btn.style.transform = 'translateY(0)';
+        btn.style.boxShadow = '0 4px 12px rgba(0,0,0,0.15)';
+      };
+      
+      document.body.appendChild(btn);
+      return btn;
     }
 
-    makeBtn('📦 Check Cache', 150, async () => {
-      const total = await MessageCache.DB.count();
-      const sample = await MessageCache.DB.firstValidSample();
-      console.log('📂 Cached messages:', total, sample ?? '(no valid samples)');
-      alert(`Cached messages: ${total}`);
-    });
+    function addCacheButtons() {
+      if (!MessageCache) {
+        console.log('Message caching not available - buttons disabled');
+        return;
+      }
 
-    makeBtn('⬇️ Export CSV', 190, MessageCache.exportCsv);
-  }
+      // Cache status button
+      createButton('Cache Stats', 150, async () => {
+        try {
+          const stats = await MessageCache.getStats();
+          const isLiveMonitoring = MessageCache.LiveMonitor.isMonitoring();
+          
+          const message = `
+📊 Cache Statistics:
+• Messages: ${stats.messageCount.toLocaleString()}
+• Edits tracked: ${stats.editCount.toLocaleString()}
+• Live monitoring: ${isLiveMonitoring ? '✅ Active' : '❌ Inactive'}
 
-  // Initialize buttons when DOM is ready
-  if (document.body) {
-    addButtons();
-  } else {
-    window.addEventListener('DOMContentLoaded', addButtons);
-  }
+Cache system is running in advanced mode with:
+• Real-time message capture
+• Edit history tracking
+• Automatic deduplication
+• Enhanced export options
+          `.trim();
+          
+          alert(message);
+          console.log('📊 Cache Stats:', stats);
+        } catch (err) {
+          console.error('Failed to get cache stats:', err);
+          alert('Failed to get cache statistics.');
+        }
+      }, '📊');
 
-  console.log('✅ GroupMe Ultimate Extension loaded successfully!');
+      // Export options button
+      createButton('Export Data', 190, () => {
+        showExportDialog();
+      }, '⬇️');
+
+      // Cache controls button
+      createButton('Cache Controls', 230, () => {
+        showCacheControlDialog();
+      }, '⚙️');
+    }
+
+    function showExportDialog() {
+      const dialog = document.createElement('div');
+      dialog.style.cssText = `
+        position: fixed;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        background: white;
+        padding: 24px;
+        border-radius: 12px;
+        box-shadow: 0 12px 40px rgba(0,0,0,0.3);
+        z-index: 1000000;
+        min-width: 320px;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      `;
+
+      dialog.innerHTML = `
+        <h3 style="margin: 0 0 16px; color: #333; font-size: 18px;">📤 Export Cache Data</h3>
+        <p style="margin: 0 0 20px; color: #666; font-size: 14px;">
+          Choose your preferred export format:
+        </p>
+        <div style="display: flex; gap: 12px; margin-bottom: 20px;">
+          <button id="export-csv" style="flex: 1; padding: 12px; border: 2px solid #667eea; background: #667eea; color: white; border-radius: 8px; cursor: pointer; font-weight: 600;">
+            📄 CSV Files
+          </button>
+          <button id="export-json" style="flex: 1; padding: 12px; border: 2px solid #764ba2; background: #764ba2; color: white; border-radius: 8px; cursor: pointer; font-weight: 600;">
+            📋 JSON File
+          </button>
+        </div>
+        <div style="display: flex; gap: 12px;">
+          <button id="export-cancel" style="flex: 1; padding: 12px; border: 2px solid #ddd; background: white; color: #666; border-radius: 8px; cursor: pointer;">
+            Cancel
+          </button>
+        </div>
+      `;
+
+      // Add backdrop
+      const backdrop = document.createElement('div');
+      backdrop.style.cssText = `
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background: rgba(0,0,0,0.5);
+        z-index: 999999;
+      `;
+
+      document.body.appendChild(backdrop);
+      document.body.appendChild(dialog);
+
+      // Event handlers
+      dialog.querySelector('#export-csv').onclick = async () => {
+        document.body.removeChild(backdrop);
+        document.body.removeChild(dialog);
+        try {
+          await MessageCache.exportData('csv');
+        } catch (err) {
+          alert('Export failed: ' + err.message);
+        }
+      };
+
+      dialog.querySelector('#export-json').onclick = async () => {
+        document.body.removeChild(backdrop);
+        document.body.removeChild(dialog);
+        try {
+          await MessageCache.exportData('json');
+        } catch (err) {
+          alert('Export failed: ' + err.message);
+        }
+      };
+
+      dialog.querySelector('#export-cancel').onclick = () => {
+        document.body.removeChild(backdrop);
+        document.body.removeChild(dialog);
+      };
+
+      backdrop.onclick = () => {
+        document.body.removeChild(backdrop);
+        document.body.removeChild(dialog);
+      };
+    }
+
+    function showCacheControlDialog() {
+      const dialog = document.createElement('div');
+      dialog.style.cssText = `
+        position: fixed;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        background: white;
+        padding: 24px;
+        border-radius: 12px;
+        box-shadow: 0 12px 40px rgba(0,0,0,0.3);
+        z-index: 1000000;
+        min-width: 360px;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      `;
+
+      const isMonitoring = MessageCache.LiveMonitor.isMonitoring();
+
+      dialog.innerHTML = `
+        <h3 style="margin: 0 0 16px; color: #333; font-size: 18px;">⚙️ Cache Controls</h3>
+        <div style="margin-bottom: 20px;">
+          <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 12px;">
+            <span style="color: #666;">Live Monitoring:</span>
+            <span style="color: ${isMonitoring ? '#22c55e' : '#ef4444'}; font-weight: 600;">
+              ${isMonitoring ? '✅ Active' : '❌ Inactive'}
+            </span>
+          </div>
+          <button id="toggle-monitoring" style="width: 100%; padding: 12px; border: 2px solid #667eea; background: ${isMonitoring ? '#ef4444' : '#22c55e'}; color: white; border-radius: 8px; cursor: pointer; font-weight: 600; margin-bottom: 12px;">
+            ${isMonitoring ? '⏹️ Stop Monitoring' : '▶️ Start Monitoring'}
+          </button>
+        </div>
+        <div style="display: flex; gap: 12px;">
+          <button id="cache-close" style="flex: 1; padding: 12px; border: 2px solid #ddd; background: white; color: #666; border-radius: 8px; cursor: pointer;">
+            Close
+          </button>
+        </div>
+      `;
+
+      // Add backdrop
+      const backdrop = document.createElement('div');
+      backdrop.style.cssText = `
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background: rgba(0,0,0,0.5);
+        z-index: 999999;
+      `;
+
+      document.body.appendChild(backdrop);
+      document.body.appendChild(dialog);
+
+      // Event handlers
+      dialog.querySelector('#toggle-monitoring').onclick = () => {
+        if (MessageCache.LiveMonitor.isMonitoring()) {
+          MessageCache.LiveMonitor.stopMonitoring();
+        } else {
+          MessageCache.LiveMonitor.startMonitoring();
+        }
+        document.body.removeChild(backdrop);
+        document.body.removeChild(dialog);
+        
+        // Show confirmation
+        setTimeout(() => {
+          const newStatus = MessageCache.LiveMonitor.isMonitoring();
+          alert(`Live monitoring ${newStatus ? 'started' : 'stopped'} successfully!`);
+        }, 100);
+      };
+
+      dialog.querySelector('#cache-close').onclick = () => {
+        document.body.removeChild(backdrop);
+        document.body.removeChild(dialog);
+      };
+
+      backdrop.onclick = () => {
+        document.body.removeChild(backdrop);
+        document.body.removeChild(dialog);
+      };
+    }
+
+    // Initialize buttons when DOM is ready
+    function initialize() {
+      if (document.body) {
+        addCacheButtons();
+      } else {
+        window.addEventListener('DOMContentLoaded', addCacheButtons);
+      }
+    }
+
+    return { initialize };
+  })();
+
+  // Initialize UI controls
+  UIControls.initialize();
+
+  /*────────────────── SECTION 6: GLOBAL DEBUG & UTILITIES ──────────────────*/
+  // Expose debugging functions globally for easier testing
+  window.GM_PLUS_DEBUG = {
+    // Message Cache debugging
+    async getCacheStats() {
+      if (!MessageCache) return { error: 'MessageCache not available' };
+      return await MessageCache.getStats();
+    },
+    
+    async exportCacheData(format = 'json') {
+      if (!MessageCache) return { error: 'MessageCache not available' };
+      return await MessageCache.exportData(format);
+    },
+    
+    toggleLiveMonitoring() {
+      if (!MessageCache) return { error: 'MessageCache not available' };
+      
+      if (MessageCache.LiveMonitor.isMonitoring()) {
+        MessageCache.LiveMonitor.stopMonitoring();
+        return { status: 'stopped' };
+      } else {
+        MessageCache.LiveMonitor.startMonitoring();
+        return { status: 'started' };
+      }
+    },
+    
+    // Font system debugging
+    getCurrentFont() {
+      const styleEl = document.getElementById('gm-font-style');
+      return {
+        hasStyle: !!styleEl,
+        content: styleEl?.textContent || null,
+        activeFont: window.localStorage.getItem('gmFont') || 'default'
+      };
+    },
+    
+    // Message counter debugging
+    getCounterInfo() {
+      return window.debugGroupCounter?.() || { error: 'Counter not available' };
+    },
+    
+    // System info
+    getSystemInfo() {
+      return {
+        version: '2.0',
+        timestamp: new Date().toISOString(),
+        url: window.location.href,
+        userAgent: navigator.userAgent,
+        features: {
+          messageCache: !!MessageCache,
+          lzString: !!window.LZString,
+          indexedDB: !!window.indexedDB,
+          webSocket: !!window.WebSocket
+        }
+      };
+    },
+      // Advanced cache operations
+    async getCachedMessagesPreview(limit = 10) {
+      if (!MessageCache) return { error: 'MessageCache not available' };
+      
+      try {
+        const messages = await MessageCache.DB.getAllMessages();
+        return {
+          total: messages.length,
+          preview: messages.slice(0, limit).map(msg => ({
+            id: msg.id,
+            text: msg.text?.substring(0, 100) + (msg.text?.length > 100 ? '...' : ''),
+            created_at: msg.created_at,
+            name: msg.name,
+            group_id: msg.group_id,
+            dom_extracted: msg.dom_extracted || false
+          }))
+        };
+      } catch (err) {
+        return { error: err.message };
+      }
+    },
+
+    // DOM extraction controls
+    enableDOMExtraction() {
+      if (!MessageCache) return { error: 'MessageCache not available' };
+      MessageCache.LiveMonitor.enableDOMExtraction();
+      return { status: 'DOM extraction enabled - monitor for duplicates!' };
+    },
+
+    disableDOMExtraction() {
+      if (!MessageCache) return { error: 'MessageCache not available' };
+      MessageCache.LiveMonitor.disableDOMExtraction();
+      return { status: 'DOM extraction disabled' };
+    },
+
+    isDOMExtractionEnabled() {
+      if (!MessageCache) return { error: 'MessageCache not available' };
+      return { enabled: MessageCache.LiveMonitor.isDOMEnabled() };
+    },
+
+    // Cleanup functions
+    async cleanupDuplicates() {
+      if (!MessageCache) return { error: 'MessageCache not available' };
+      
+      try {
+        const messages = await MessageCache.DB.getAllMessages();
+        const seenTexts = new Map();
+        const duplicates = [];
+        
+        messages.forEach(msg => {
+          const key = `${msg.text}_${msg.group_id}_${msg.created_at}`;
+          if (seenTexts.has(key)) {
+            // This is a duplicate
+            if (msg.dom_extracted || msg.name === 'Unknown' || msg.id.includes('.')) {
+              duplicates.push(msg.id);
+            }
+          } else {
+            seenTexts.set(key, msg.id);
+          }
+        });
+        
+        console.log(`Found ${duplicates.length} potential duplicates to clean`);
+        return { 
+          found: duplicates.length,
+          message: `Found ${duplicates.length} potential duplicates. Use cleanupDuplicatesConfirm() to remove them.`,
+          duplicateIds: duplicates.slice(0, 10) // Show first 10 as preview
+        };
+      } catch (err) {
+        return { error: err.message };
+      }
+    },
+    
+    async getEditHistory(limit = 10) {
+      if (!MessageCache) return { error: 'MessageCache not available' };
+      
+      try {
+        const edits = await MessageCache.DB.getEditHistory();
+        return {
+          total: edits.length,
+          recent: edits.slice(-limit).map(edit => ({
+            message_id: edit.message_id,
+            original: edit.original_text?.substring(0, 50) + '...',
+            new: edit.new_text?.substring(0, 50) + '...',
+            timestamp: new Date(edit.edit_timestamp).toLocaleString()
+          }))
+        };
+      } catch (err) {
+        return { error: err.message };
+      }
+    },
+    
+    // Compression statistics
+    async getCompressionStats() {
+      if (!MessageCache) return { error: 'MessageCache not available' };
+      
+      try {
+        const db = await MessageCache.DB.open();
+        const tx = db.transaction(['messages'], 'readonly');
+        const store = tx.objectStore('messages');
+        
+        return new Promise((resolve, reject) => {
+          let totalMessages = 0;
+          let compressedMessages = 0;
+          let totalUncompressedEstimate = 0;
+          let totalCompressedSize = 0;
+          
+          const req = store.openCursor();
+          req.onsuccess = (e) => {
+            const cursor = e.target.result;
+            if (!cursor) {
+              const compressionRatio = totalCompressedSize > 0 ? 
+                ((totalUncompressedEstimate - totalCompressedSize) / totalUncompressedEstimate * 100).toFixed(1) : 0;
+              
+              return resolve({
+                total_messages: totalMessages,
+                compressed_messages: compressedMessages,
+                uncompressed_messages: totalMessages - compressedMessages,
+                estimated_uncompressed_size: `${(totalUncompressedEstimate / 1024 / 1024).toFixed(2)} MB`,
+                actual_compressed_size: `${(totalCompressedSize / 1024 / 1024).toFixed(2)} MB`,
+                compression_ratio: `${compressionRatio}%`,
+                space_saved: `${((totalUncompressedEstimate - totalCompressedSize) / 1024 / 1024).toFixed(2)} MB`
+              });
+            }
+            
+            totalMessages++;
+            const record = cursor.value;
+            
+            if (record.compressed) {
+              compressedMessages++;
+              totalCompressedSize += record.data.length * 2; // UTF-16 approx
+              
+              // Estimate original size by decompressing and measuring
+              try {
+                const decompressed = MessageCache.DB.decompressMessageFromStorage(record);
+                if (decompressed) {
+                  totalUncompressedEstimate += JSON.stringify(decompressed).length * 2;
+                }
+              } catch (err) {
+                // Fallback estimate
+                totalUncompressedEstimate += record.data.length * 3; // Rough estimate
+              }
+            } else {
+              // Uncompressed fallback
+              const jsonSize = JSON.stringify(record.data).length * 2;
+              totalUncompressedEstimate += jsonSize;
+              totalCompressedSize += jsonSize;
+            }
+            
+            cursor.continue();
+          };
+          
+          req.onerror = () => reject(req.error);
+        });
+      } catch (err) {
+        return { error: err.message };
+      }
+    },
+    
+    // Performance monitoring
+    getPerformanceMetrics() {
+      return {
+        memory: performance.memory ? {
+          used: Math.round(performance.memory.usedJSHeapSize / 1024 / 1024) + ' MB',
+          total: Math.round(performance.memory.totalJSHeapSize / 1024 / 1024) + ' MB',
+          limit: Math.round(performance.memory.jsHeapSizeLimit / 1024 / 1024) + ' MB'
+        } : 'Not available',
+        timing: performance.timing ? {
+          pageLoad: performance.timing.loadEventEnd - performance.timing.navigationStart + ' ms',
+          domReady: performance.timing.domContentLoadedEventEnd - performance.timing.navigationStart + ' ms'
+        } : 'Not available'
+      };
+    }
+  };
+
+  // Enhanced console logging with better formatting
+  const Logger = {
+    info: (msg, ...args) => console.log(`%c[GM Plus]%c ${msg}`, 'color: #667eea; font-weight: bold', 'color: inherit', ...args),
+    warn: (msg, ...args) => console.warn(`%c[GM Plus]%c ${msg}`, 'color: #f59e0b; font-weight: bold', 'color: inherit', ...args),
+    error: (msg, ...args) => console.error(`%c[GM Plus]%c ${msg}`, 'color: #ef4444; font-weight: bold', 'color: inherit', ...args),
+    success: (msg, ...args) => console.log(`%c[GM Plus]%c ${msg}`, 'color: #22c55e; font-weight: bold', 'color: inherit', ...args)
+  };
+
+  // Replace existing console.log calls with enhanced logger
+  Logger.success('Extension loaded successfully! 🚀');
+  Logger.info('Available debug commands:', Object.keys(window.GM_PLUS_DEBUG));
+  Logger.info('Use GM_PLUS_DEBUG.getSystemInfo() to see system status');
 })();
