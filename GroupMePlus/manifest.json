@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "GroupMe Plus",
-  "version": "2.0",
+  "version": "1.0",
   "description": "The ultimate GroupMe extension with font picker, message caching, and message counting.",
   "icons": {
     "48": "icon48.png",
