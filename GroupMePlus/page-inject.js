@@ -1,4 +1,3 @@
-// page-inject.js - Enhanced API interception for comprehensive message caching
 (function () {
   'use strict';
   
@@ -8,7 +7,6 @@
   const messageStore = new Map();
   let interceptCount = 0;
 
-  // Enhanced fetch interception
   const originalFetch = window.fetch;
   window.fetch = async function (...args) {
     const response = await originalFetch.apply(this, args);
@@ -16,7 +14,6 @@
     
     if (isGroupMeAPI(url)) {
       try {
-        // Clone response for processing without affecting original
         const clonedResponse = response.clone();
         await handleAPIResponse(clonedResponse, url, 'fetch');
       } catch (err) {
@@ -50,7 +47,6 @@
   window.WebSocket = function (...args) {
     const ws = new originalWebSocket(...args);
     
-    // Intercept WebSocket messages
     const originalOnMessage = ws.onmessage;
     ws.addEventListener('message', function (event) {
       try {
@@ -60,14 +56,13 @@
           handleRealtimeMessage(data);
         }
       } catch (err) {
-        // Not JSON or not relevant, ignore
+        // nothing
       }
     });
     
     return ws;
   };
 
-  // Improved API detection
   function isGroupMeAPI(url) {
     if (typeof url !== 'string') return false;
     
@@ -76,13 +71,12 @@
         (url.includes('/groups/') && url.includes('/messages')) ||
         url.includes('/direct_messages') ||
         url.includes('/likes') ||
-        url.includes('/destroy') // For message deletions
+        url.includes('/destroy')
       )) ||
-      url.includes('/push/') // Real-time endpoints
+      url.includes('/push/')
     );
   }
 
-  // Check if data contains real-time message updates
   function isRealtimeMessage(data) {
     return data && (
       data.type === 'message' ||
@@ -91,7 +85,6 @@
       (data.data && data.data.type === 'message')
     );
   }
-  // Enhanced message processing with strict validation
   async function handleAPIResponse(responseOrData, url, source) {
     try {
       const data = responseOrData.json ? await responseOrData.json() : responseOrData;
@@ -107,7 +100,7 @@
       let skippedCount = 0;
       
       for (const message of messages) {
-        // Strict validation - skip messages without proper IDs
+        // skip messages without proper IDs
         if (!message.id || typeof message.id !== 'string' || message.id.length < 10) {
           console.warn('📡 Skipping message with invalid ID:', message.id);
           skippedCount++;
@@ -124,7 +117,7 @@
         const processed = enhanceMessage(message, url);
         const messageKey = `msg-${processed.id}`;
         
-        // Check for edits by comparing with stored version
+        // Check for edits
         if (messageStore.has(processed.id)) {
           const stored = messageStore.get(processed.id);
           if (stored.text !== processed.text && stored.text && processed.text && 
@@ -143,7 +136,6 @@
           newCount++;
         }
         
-        // Update our local store
         messageStore.set(processed.id, {
           text: processed.text,
           name: processed.name,
@@ -237,7 +229,6 @@
     }
   }
 
-  // Enhanced message data extraction and enrichment
   function enhanceMessage(rawMessage, url) {
     const message = {
       // Core fields
@@ -262,7 +253,7 @@
       platform: rawMessage.platform || 'web'
     };
     
-    // Handle DM context
+    // Handle DMs
     if (url && url.includes('/direct_messages')) {
       message.is_dm = true;
       const otherUserMatch = url.match(/other_user_id=(\d+)/);
@@ -276,7 +267,6 @@
       }
     }
     
-    // Optional fields (only include if present)
     const optionalFields = [
       'attachments', 'favorited_by', 'likes_count', 'mentions',
       'system', 'event', 'subject', 'location'
@@ -294,7 +284,6 @@
       }
     });
     
-    // Handle special message types
     if (rawMessage.system) {
       message.system = true;
       message.message_type = 'system';
@@ -304,8 +293,8 @@
     } else {
       message.message_type = 'user';
     }
-    
-    // Parse attachments for better structure
+
+    // Parse attachments
     if (message.attachments && Array.isArray(message.attachments)) {
       message.attachments = message.attachments.map(att => ({
         type: att.type,
@@ -319,7 +308,7 @@
     return message;
   }
 
-  // Periodic cleanup of message store to prevent memory leaks
+  // Periodic cleanup of message store
   setInterval(() => {
     const cutoff = Date.now() - (24 * 60 * 60 * 1000); // 24 hours
     let cleaned = 0;
@@ -334,9 +323,8 @@
     if (cleaned > 0) {
       console.log(`🧹 Cleaned ${cleaned} old message entries from memory`);
     }
-  }, 60 * 60 * 1000); // Run every hour
+  }, 60 * 60 * 1000); // Once per hour
 
-  // Expose debugging interface
   window.GM_DEBUG = {
     getMessageStore: () => messageStore,
     getInterceptCount: () => interceptCount,
