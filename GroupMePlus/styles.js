@@ -26,7 +26,6 @@
     s.id = 'gm-plus-theme';
     s.textContent = css;
     document.head.appendChild(s);
-    console.log('[GM+ Theme] Style injected.');
   }
 
   function injectStyleWhenReady() {

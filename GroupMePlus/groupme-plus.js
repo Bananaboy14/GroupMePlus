@@ -6,10 +6,10 @@
   const $$ = (sel, p = document) => [...p.querySelectorAll(sel)];
   const idle = fn => (window.requestIdleCallback || setTimeout)(fn, 1);
   const importCSS = href => {
-    if ($(`link[href="${href}"]`)) return;
     const l = document.createElement('link');
     l.rel = 'stylesheet';
     l.href = href;
+    l.onerror = () => console.error(`[GM+ Font] CSS failed to load: ${href}`);
     document.head.appendChild(l);
   };
 
@@ -97,19 +97,79 @@
 
     return { store, stats, all };
   })();
-
-  /* ========= Fonts ========= */
+  // Fonts
   const FONT_FAMILIES = [
-    'Roboto','Open Sans','Lato','Montserrat','Oswald','Source Sans Pro','Poppins','Raleway','Inter','Nunito',
+    'Mona Sans','Roboto','Open Sans','Lato','Montserrat','Oswald','Source Sans Pro','Poppins','Raleway','Inter','Nunito',
     'Merriweather','Playfair Display','Ubuntu','Work Sans','PT Sans','Rubik','Fira Sans','Inconsolata','JetBrains Mono',
     'DM Sans','Mulish','Cabin','Dosis','Bitter','Quicksand','Karla','Manrope','Noto Sans','Noto Serif','Caveat',
     'Anton','Arvo','Josefin Sans','Libre Baskerville','Muli','Mukta','Barlow','Heebo','Hind','Tajawal',
     'Press Start 2P','Teko','Titillium Web','Zilla Slab','Cormorant Garamond','Exo 2','Bebas Neue','Archivo','Varela Round','Questrial'
   ];
-  const FONT_MAP = Object.fromEntries(
-    FONT_FAMILIES.map(f => [f, `'${f}',${/Mono|Code/.test(f)?'monospace':'sans-serif'}`])
+
+  // Available weights for each font
+  const FONT_WEIGHTS = {
+    'Mona Sans': [200,300,400,500,600,700,800,900],
+    'Roboto': [100,200,300,400,500,600,700,800,900],
+    'Open Sans': [300,400,500,600,700,800],
+    'Lato': [100,300,400,700,900],
+    'Montserrat': [100,200,300,400,500,600,700,800,900],
+    'Oswald': [200,300,400,500,600,700],
+    'Source Sans Pro': [200,300,400,600,700,900],
+    'Poppins': [100,200,300,400,500,600,700,800,900],
+    'Raleway': [100,200,300,400,500,600,700,800,900],
+    'Inter': [100,200,300,400,500,600,700,800,900],
+    'Nunito': [200,300,400,500,600,700,800,900],
+    'Merriweather': [300,400,700,900],
+    'Playfair Display': [400,500,600,700,800,900],
+    'Ubuntu': [300,400,500,700],
+    'Work Sans': [100,200,300,400,500,600,700,800,900],
+    'PT Sans': [400,700],
+    'Rubik': [300,400,500,600,700,800,900],
+    'Fira Sans': [100,200,300,400,500,600,700,800,900],
+    'Inconsolata': [200,300,400,500,600,700,800,900],
+    'JetBrains Mono': [100,200,300,400,500,600,700,800],
+    'DM Sans': [100,200,300,400,500,600,700,800,900],
+    'Mulish': [200,300,400,500,600,700,800,900],
+    'Cabin': [400,500,600,700],
+    'Dosis': [200,300,400,500,600,700,800],
+    'Bitter': [100,200,300,400,500,600,700,800,900],
+    'Quicksand': [300,400,500,600,700],
+    'Karla': [200,300,400,500,600,700,800],
+    'Manrope': [200,300,400,500,600,700,800],
+    'Noto Sans': [100,200,300,400,500,600,700,800,900],
+    'Noto Serif': [100,200,300,400,500,600,700,800,900],
+    'Caveat': [400,500,600,700],
+    'Anton': [400],
+    'Arvo': [400,700],
+    'Josefin Sans': [100,200,300,400,500,600,700],
+    'Libre Baskerville': [400,700],
+    'Muli': [200,300,400,500,600,700,800,900],
+    'Mukta': [200,300,400,500,600,700,800],
+    'Barlow': [100,200,300,400,500,600,700,800,900],
+    'Heebo': [100,200,300,400,500,600,700,800,900],
+    'Hind': [300,400,500,600,700],
+    'Tajawal': [200,300,400,500,700,800,900],
+    'Press Start 2P': [400],
+    'Teko': [300,400,500,600,700],
+    'Titillium Web': [200,300,400,600,700,900],
+    'Zilla Slab': [300,400,500,600,700],
+    'Cormorant Garamond': [300,400,500,600,700],
+    'Exo 2': [100,200,300,400,500,600,700,800,900],
+    'Bebas Neue': [400],
+    'Archivo': [100,200,300,400,500,600,700,800,900],
+    'Varela Round': [400],
+    'Questrial': [400]
+  };  const FONT_MAP = Object.fromEntries(
+    FONT_FAMILIES.map(f => {
+      if (f === 'Mona Sans') {
+        return [f, `"Mona Sans", -system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif`];
+      }
+      return [f, `'${f}',${/Mono|Code/.test(f)?'monospace':'sans-serif'}`];
+    })
   );
-  /* ========= Tray / sidebar wiring ========= */  const SVGs = {
+
+  // Sidebar icons
+  const SVGs = {
     font: `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-type-icon lucide-type"><path d="M12 4v16"/><path d="M4 7V5a1 1 0 0 1 1-1h14a1 1 0 0 1 1 1v2"/><path d="M9 20h6"/></svg>`,
     save: `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-save-icon lucide-save"><path d="M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M17 21v-7a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v7"/><path d="M7 3v4a1 1 0 0 0 1 1h7"/></svg>`,
     bars: `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-hash-icon lucide-hash"><line x1="4" x2="20" y1="9" y2="9"/><line x1="4" x2="20" y1="15" y2="15"/><line x1="10" x2="8" y1="3" y2="21"/><line x1="16" x2="14" y1="3" y2="21"/></svg>`,
@@ -117,7 +177,6 @@
   };
   let sidebar, panes = [];
 
-  /* ----- inject sidebar styles ----- */
   function injectSidebarStyles() {
     if (document.getElementById('gm-sidebar-styles')) return;
     const css = `
@@ -128,6 +187,7 @@
       .gm-plus-sep{width:32px;height:1px;background:#3a3a3a;margin:4px auto}
       .gm-plus-btn{background:none;border:none;width:40px;height:40px;border-radius:6px;display:flex;align-items:center;justify-content:center;cursor:pointer}
       .gm-plus-btn:hover,.gm-plus-btn.active{background:rgba(255,255,255,.08)}
+      .gm-plus-btn svg{pointer-events:none}
     `;
     const s = document.createElement('style');
     s.id = 'gm-sidebar-styles';
@@ -159,7 +219,7 @@
     };
   }
 
-  /* ----- helper to add our own buttons into tray ----- */
+  // Add buttons to the tray
   function ensureSeparator(tray) {
     if ($('.gm-plus-sep', tray)) return;
     const sep = document.createElement('div');
@@ -179,7 +239,7 @@
     return b;
   }
 
-  /* ========= panes ========= */
+  // Panes for the tools
   const Counter = (() => {
     let total = 0, group = null, lbl;
     const handle = payload => {
@@ -200,7 +260,6 @@
   })();
 
   function buildFontPane(pane) {
-    /* selectors */
     const familySel = document.createElement('select');
     familySel.style.width = '100%';
     FONT_FAMILIES.forEach(f => {
@@ -210,56 +269,140 @@
     const controls = document.createElement('div');
     controls.style.cssText = 'display:flex;gap:8px;margin-top:8px';
 
-    const sizeIn  = document.createElement('input');
-    sizeIn.type = 'number'; sizeIn.min = 10; sizeIn.max = 48; sizeIn.value = 14;
-    sizeIn.style.width = '72px';
-
     const weightSel = document.createElement('select');
-    [100,200,300,400,500,600,700,800,900].forEach(w=>{
-      const o=document.createElement('option'); o.value=o.textContent=w; weightSel.appendChild(o);
-    });
+    
+    // Function to update weight options based on selected font
+    const updateWeightOptions = (fontFamily) => {
+      const availableWeights = FONT_WEIGHTS[fontFamily] || [400];
+      const currentWeight = weightSel.value;
+      
+      // Clear existing options
+      weightSel.innerHTML = '';
+      
+      // Add available weights
+      availableWeights.forEach(w => {
+        const o = document.createElement('option');
+        o.value = o.textContent = w;
+        weightSel.appendChild(o);
+      });
+      
+      // Try to maintain current weight if it's available, otherwise use first available
+      if (availableWeights.includes(parseInt(currentWeight))) {
+        weightSel.value = currentWeight;
+      } else {
+        weightSel.value = availableWeights.includes(400) ? 400 : availableWeights[0];
+      }
+    };
 
     const colorIn = document.createElement('input');
     colorIn.type = 'color'; colorIn.value = '#f3f4f6';
 
-    controls.append(sizeIn, weightSel, colorIn);
+    controls.append(weightSel, colorIn);
     pane.append(familySel, controls);
 
     const preview = document.createElement('p');
     preview.textContent = 'Aa Quick Brown Fox';
-    preview.style.marginTop = '12px';
-    pane.appendChild(preview);
+    preview.style.marginTop = '12px';    pane.appendChild(preview);
 
-    const KEY = 'GMPlusFont';
+    /* Reset button */
+    const resetBtn = document.createElement('button');
+    resetBtn.textContent = 'Reset to Defaults';
+    resetBtn.className = 'gm-btn';
+    resetBtn.style.cssText = 'width:100%;margin-top:8px;background:#666;';
+    pane.appendChild(resetBtn);    const KEY = 'GMPlusFont';
+    const defaults = { family: 'Mona Sans', weight: 400, color: '#f3f4f6' };
+    
+    // Initialize weight options for default font
+    updateWeightOptions(defaults.family);
+    
     const saved = JSON.parse(localStorage.getItem(KEY) || '{}');
     if (saved.family) {
       familySel.value = saved.family;
-      sizeIn.value   = saved.size;
-      weightSel.value= saved.weight;
-      colorIn.value  = saved.color;
+      updateWeightOptions(saved.family);
+      weightSel.value = saved.weight;
+      colorIn.value = saved.color;
+    } else {
+      familySel.value = defaults.family;
+      weightSel.value = defaults.weight;
+      colorIn.value = defaults.color;
     }
 
-    const apply = () => {
+    // Update weights when font family changes
+    familySel.addEventListener('change', () => {
+      updateWeightOptions(familySel.value);
+      apply();
+    });    const apply = () => {
       const fam = familySel.value;
-      const size= sizeIn.value + 'px';
       const weight = weightSel.value;
       const color = colorIn.value;
 
-      preview.style.cssText = `font-family:${FONT_MAP[fam]};font-size:${size};font-weight:${weight};color:${color}`;
+      preview.style.cssText = `font-family:${FONT_MAP[fam]};font-weight:${weight};color:${color}`;
 
-      /* import font once */
-      importCSS(`https://fonts.googleapis.com/css2?family=${encodeURIComponent(fam.replace(/ /g,'+'))}:wght@100..900&display=swap`);
+      const isDefault = (fam === defaults.family && 
+                        parseInt(weightSel.value) === defaults.weight && 
+                        colorIn.value === defaults.color);
 
-      /* global style */
-      let st = $('#gm-font-style');
-      if (!st) { st = document.createElement('style'); st.id = 'gm-font-style'; document.head.appendChild(st); }
-      st.textContent =
-        `body,*{font-family:${FONT_MAP[fam]} !important;font-size:${size} !important;font-weight:${weight} !important;color:${color} !important}`;
+      if (isDefault) {
+        const st = $('#gm-font-style');
+        if (st) st.remove();
+        console.log('[GM+ Font] Using default settings - preserving GroupMe\'s natural font hierarchy');
+      } else {
+        const fontName = fam.replace(/ /g, '+');
+        const fontUrl = `https://fonts.googleapis.com/css2?family=${fontName}:wght@${weight}&display=swap`;
+        console.log(`[GM+ Font] Loading font: "${fam}" weight ${weight} from URL: ${fontUrl}`);
+        
+        importCSS(fontUrl);        
+        setTimeout(() => {
+          const testElement = document.createElement('div');
+          testElement.style.cssText = `position:absolute;visibility:hidden;font-family:${FONT_MAP[fam]};font-size:72px;font-weight:${weight};`;
+          testElement.textContent = 'Test';
+          document.body.appendChild(testElement);
+          
+          const fallbackElement = document.createElement('div');
+          fallbackElement.style.cssText = `position:absolute;visibility:hidden;font-family:serif;font-size:72px;font-weight:${weight};`;
+          fallbackElement.textContent = 'Test';
+          document.body.appendChild(fallbackElement);
+          
+          const fontLoaded = testElement.offsetWidth !== fallbackElement.offsetWidth;
+          console.log(`[GM+ Font] Font "${fam}" weight ${weight} loaded successfully: ${fontLoaded}`);
+          
+          document.body.removeChild(testElement);
+          document.body.removeChild(fallbackElement);
 
-      localStorage.setItem(KEY, JSON.stringify({ family:fam, size:sizeIn.value, weight:weightSel.value, color }));
+          if (!fontLoaded) {
+            console.warn(`[GM+ Font] Font "${fam}" weight ${weight} failed to load, falling back to system font`);
+          }
+        }, 1000);
+
+        /* Apply global custom style - only font family, weight, and color */
+        let st = $('#gm-font-style');
+        if (!st) { st = document.createElement('style'); st.id = 'gm-font-style'; document.head.appendChild(st); }
+        st.textContent =
+          `body,*{font-family:${FONT_MAP[fam]} !important;font-weight:${weight} !important;color:${color} !important}`;
+      }
+
+      localStorage.setItem(KEY, JSON.stringify({ family:fam, weight:weightSel.value, color }));
     };
 
-    [familySel, sizeIn, weightSel, colorIn].forEach(el => el.addEventListener('input', apply));
+    const reset = () => {
+      familySel.value = defaults.family;
+      updateWeightOptions(defaults.family);
+      weightSel.value = defaults.weight;
+      colorIn.value = defaults.color;
+      
+      /* Remove custom font style */
+      const st = $('#gm-font-style');
+      if (st) st.remove();
+      
+      /* Clear localStorage */
+      localStorage.removeItem(KEY);
+      
+      console.log('[GM+ Font] Reset to defaults');
+      apply();
+    };
+
+    [weightSel, colorIn].forEach(el => el.addEventListener('input', apply));
+    resetBtn.addEventListener('click', reset);
     apply();
   }
 
@@ -357,7 +500,6 @@
       }
     });
 
-    console.log('[GM+] UI ready');
   })();
 
   /* ========= open / close helpers ========= */

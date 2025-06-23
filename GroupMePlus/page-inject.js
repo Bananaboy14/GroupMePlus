@@ -1,8 +1,6 @@
 (function () {
   'use strict';
   
-  console.log('🚀 GroupMe Plus page script initializing...');
-  
   // Store for tracking message state and detecting edits
   const messageStore = new Map();
   let interceptCount = 0;
@@ -52,7 +50,6 @@
       try {
         const data = JSON.parse(event.data);
         if (isRealtimeMessage(data)) {
-          console.log('📡 Real-time message intercepted via WebSocket');
           handleRealtimeMessage(data);
         }
       } catch (err) {
@@ -126,7 +123,6 @@
             processed.edit_detected = true;
             processed.edit_timestamp = Date.now();
             editCount++;
-            console.log(`📝 Edit detected for message ${processed.id}`);
           } else {
             // Same message, skip
             skippedCount++;
@@ -163,8 +159,6 @@
             batch_id: interceptCount
           }
         }, '*');
-      } else if (skippedCount > 0) {
-        console.log(`📥 ${source.toUpperCase()}: All ${skippedCount} messages skipped (duplicates/invalid)`);
       }
       
     } catch (err) {
@@ -196,11 +190,7 @@
           processed.original_text = stored.text;
           processed.edit_detected = true;
           processed.edit_timestamp = Date.now();
-          console.log(`📝 Real-time edit detected for message ${processed.id}`);
-        } else {
-          // Same message, skip
-          console.log(`📡 Skipping duplicate real-time message: ${processed.id}`);
-          return;
+        } else { return;
         }
       }
       
@@ -320,9 +310,6 @@
       }
     }
     
-    if (cleaned > 0) {
-      console.log(`🧹 Cleaned ${cleaned} old message entries from memory`);
-    }
   }, 60 * 60 * 1000); // Once per hour
 
   window.GM_DEBUG = {
@@ -330,7 +317,6 @@
     getInterceptCount: () => interceptCount,
     clearMessageStore: () => {
       messageStore.clear();
-      console.log('🧹 Message store cleared');
     },
     getStats: () => ({
       stored_messages: messageStore.size,
@@ -340,5 +326,4 @@
   };
 
   const startTime = Date.now();
-  console.log('✅ GroupMe Plus page script active - Enhanced message interception enabled');
 })();
