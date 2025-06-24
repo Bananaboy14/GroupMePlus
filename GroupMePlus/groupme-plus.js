@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  /* ========= Tiny helpers ========= */
+  // Helpers
   const $  = (sel, p = document) => p.querySelector(sel);
   const $$ = (sel, p = document) => [...p.querySelectorAll(sel)];
   const idle = fn => (window.requestIdleCallback || setTimeout)(fn, 1);
@@ -13,7 +13,7 @@
     document.head.appendChild(l);
   };
 
-  /* ========= IndexedDB cache ========= */
+  // IndexedDB Cache
   const Cache = (() => {
     if (!window.LZString) return null;
 
@@ -97,13 +97,13 @@
 
     return { store, stats, all };
   })();
-  // Fonts
+
   const FONT_FAMILIES = [
-    'Mona Sans','Roboto','Open Sans','Lato','Montserrat','Oswald','Source Sans Pro','Poppins','Raleway','Inter','Nunito',
-    'Merriweather','Playfair Display','Ubuntu','Work Sans','PT Sans','Rubik','Fira Sans','Inconsolata','JetBrains Mono',
-    'DM Sans','Mulish','Cabin','Dosis','Bitter','Quicksand','Karla','Manrope','Noto Sans','Noto Serif','Caveat',
-    'Anton','Arvo','Josefin Sans','Libre Baskerville','Muli','Mukta','Barlow','Heebo','Hind','Tajawal',
-    'Press Start 2P','Teko','Titillium Web','Zilla Slab','Cormorant Garamond','Exo 2','Bebas Neue','Archivo','Varela Round','Questrial'
+    'Anton','Archivo','Arvo','Barlow','Bebas Neue','Bitter','Cabin','Caveat','Comic Neue','Cormorant Garamond','Creepster',
+    'DM Sans','Dosis','Exo 2','Fira Sans','Heebo','Hind','Inconsolata','Inter','JetBrains Mono','Josefin Sans','Karla',
+    'Lato','Libre Baskerville','Lobster','Manrope','Merriweather','Mona Sans','Montserrat','Muli','Mulish','Mukta','Noto Sans',
+    'Noto Serif','Nunito','Open Sans','Orbitron','Oswald','PT Sans','Playfair Display','Poppins','Press Start 2P','Questrial','Quicksand',
+    'Raleway','Roboto','Rubik','Source Sans Pro','Tajawal','Teko','Titillium Web','Ubuntu','Varela Round','Work Sans','Zilla Slab'
   ];
 
   // Available weights for each font
@@ -114,6 +114,7 @@
     'Lato': [100,300,400,700,900],
     'Montserrat': [100,200,300,400,500,600,700,800,900],
     'Oswald': [200,300,400,500,600,700],
+    'Orbitron': [400,500,600,700,800,900],
     'Source Sans Pro': [200,300,400,600,700,900],
     'Poppins': [100,200,300,400,500,600,700,800,900],
     'Raleway': [100,200,300,400,500,600,700,800,900],
@@ -139,10 +140,13 @@
     'Noto Sans': [100,200,300,400,500,600,700,800,900],
     'Noto Serif': [100,200,300,400,500,600,700,800,900],
     'Caveat': [400,500,600,700],
+    'Comic Neue': [300,400,700],
+    'Creepster': [400],
     'Anton': [400],
     'Arvo': [400,700],
     'Josefin Sans': [100,200,300,400,500,600,700],
     'Libre Baskerville': [400,700],
+    'Lobster': [400],
     'Muli': [200,300,400,500,600,700,800,900],
     'Mukta': [200,300,400,500,600,700,800],
     'Barlow': [100,200,300,400,500,600,700,800,900],
@@ -159,7 +163,8 @@
     'Archivo': [100,200,300,400,500,600,700,800,900],
     'Varela Round': [400],
     'Questrial': [400]
-  };  const FONT_MAP = Object.fromEntries(
+  };
+  const FONT_MAP = Object.fromEntries(
     FONT_FAMILIES.map(f => {
       if (f === 'Mona Sans') {
         return [f, `"Mona Sans", -system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif`];
@@ -180,7 +185,7 @@
   function injectSidebarStyles() {
     if (document.getElementById('gm-sidebar-styles')) return;
     const css = `
-      .gm-sidebar{position:fixed;top:64px;left:72px;width:360px;max-height:80vh;overflow:auto;border-radius:8px;z-index:2147483000}
+      .gm-sidebar{position:fixed;width:360px;max-height:80vh;overflow:auto;border-radius:8px;z-index:2147483000}
       .gm-hidden{display:none}
       .gm-pane{padding:12px}
       .gm-btn{margin:6px 4px;padding:8px 12px;border-radius:6px;background:var(--gm-accent-1,#667eea);color:#fff;border:none;cursor:pointer}
@@ -188,6 +193,17 @@
       .gm-plus-btn{background:none;border:none;width:40px;height:40px;border-radius:6px;display:flex;align-items:center;justify-content:center;cursor:pointer}
       .gm-plus-btn:hover,.gm-plus-btn.active{background:rgba(255,255,255,.08)}
       .gm-plus-btn svg{pointer-events:none}
+      .gm-font-select{background:#2a2a2a;color:#fff;border:1px solid #444;border-radius:4px;padding:6px;font-size:14px}
+      .gm-font-select option{background:#2a2a2a;color:#fff}
+      .gm-color-input{width:100%;height:36px;border:1px solid #444;border-radius:4px;background:none;cursor:pointer}
+      .gm-search-input{width:100%;background:#2a2a2a;color:#fff;border:1px solid #444;border-radius:4px;padding:8px;font-size:14px;margin-bottom:8px}
+      .gm-search-input::placeholder{color:#888}
+      .gm-font-dropdown{position:relative;width:100%}
+      .gm-dropdown-list{position:fixed;background:#2a2a2a;border:1px solid #444;border-radius:4px;max-height:300px;overflow-y:auto;z-index:2147483001;display:none;box-shadow:0 4px 12px rgba(0,0,0,0.3)}
+      .gm-dropdown-item{padding:8px 12px;cursor:pointer;color:#fff;font-size:14px;border-bottom:1px solid #333}
+      .gm-dropdown-item:last-child{border-bottom:none}
+      .gm-dropdown-item:hover,.gm-dropdown-item.highlighted{background:#444}
+      .gm-dropdown-item.selected{background:#667eea;color:#fff}
     `;
     const s = document.createElement('style');
     s.id = 'gm-sidebar-styles';
@@ -260,33 +276,164 @@
   })();
 
   function buildFontPane(pane) {
-    const familySel = document.createElement('select');
-    familySel.style.width = '100%';
-    FONT_FAMILIES.forEach(f => {
-      const o = document.createElement('option'); o.value = f; o.textContent = f; familySel.appendChild(o);
+    const dropdownContainer = document.createElement('div');
+    dropdownContainer.className = 'gm-font-dropdown';
+    
+    const searchInput = document.createElement('input');
+    searchInput.type = 'text';
+    searchInput.placeholder = 'Search and select a font...';
+    searchInput.className = 'gm-search-input';
+    
+    const dropdownList = document.createElement('div');
+    dropdownList.className = 'gm-dropdown-list';
+    
+    dropdownContainer.appendChild(searchInput);
+    dropdownContainer.appendChild(dropdownList);
+    pane.appendChild(dropdownContainer);
+
+    let selectedFont = 'Mona Sans';
+    let highlightedIndex = -1;
+    let filteredFonts = [...FONT_FAMILIES];
+    
+    const populateDropdown = (filter = '') => {
+      filteredFonts = FONT_FAMILIES.filter(f => 
+        f.toLowerCase().includes(filter.toLowerCase())
+      );
+      
+      dropdownList.innerHTML = '';
+      filteredFonts.forEach((font, index) => {
+        const item = document.createElement('div');
+        item.className = 'gm-dropdown-item';
+        item.textContent = font;
+        
+        if (font === selectedFont) {
+          item.classList.add('selected');
+        }
+        
+        item.addEventListener('click', () => {
+          selectedFont = font;
+          searchInput.value = font;
+          hideDropdown();
+          updateWeightOptions(font);
+          apply();
+        });
+        
+        dropdownList.appendChild(item);
+      });
+      
+      highlightedIndex = -1;
+    };
+    
+    const showDropdown = () => {
+      populateDropdown(searchInput.value);
+      
+      const inputRect = searchInput.getBoundingClientRect();
+      const viewportHeight = window.innerHeight;
+      const dropdownMaxHeight = 300;
+      
+      const spaceBelow = viewportHeight - inputRect.bottom - 8;
+      const spaceAbove = inputRect.top - 8;
+      
+      if (spaceBelow >= Math.min(dropdownMaxHeight, 150) || spaceBelow >= spaceAbove) {
+        dropdownList.style.top = `${inputRect.bottom + 4}px`;
+        dropdownList.style.maxHeight = `${Math.min(dropdownMaxHeight, spaceBelow)}px`;
+      } else {
+        dropdownList.style.top = `${Math.max(8, inputRect.top - Math.min(dropdownMaxHeight, spaceAbove))}px`;
+        dropdownList.style.maxHeight = `${Math.min(dropdownMaxHeight, spaceAbove)}px`;
+      }
+      
+      dropdownList.style.left = `${inputRect.left}px`;
+      dropdownList.style.width = `${inputRect.width}px`;
+      dropdownList.style.display = 'block';
+    };
+    
+    const hideDropdown = () => {
+      dropdownList.style.display = 'none';
+      highlightedIndex = -1;
+    };
+    
+    const updateHighlight = () => {
+      const items = dropdownList.querySelectorAll('.gm-dropdown-item');
+      items.forEach((item, index) => {
+        item.classList.toggle('highlighted', index === highlightedIndex);
+      });
+      
+      if (highlightedIndex >= 0 && items[highlightedIndex]) {
+        items[highlightedIndex].scrollIntoView({ block: 'nearest' });
+      }
+    };
+    
+    searchInput.addEventListener('focus', showDropdown);
+    
+    searchInput.addEventListener('input', () => {
+      populateDropdown(searchInput.value);
+      showDropdown();
+    });
+    
+    searchInput.addEventListener('keydown', (e) => {
+      const items = dropdownList.querySelectorAll('.gm-dropdown-item');
+      
+      switch(e.key) {
+        case 'ArrowDown':
+          e.preventDefault();
+          highlightedIndex = Math.min(highlightedIndex + 1, items.length - 1);
+          updateHighlight();
+          break;
+        case 'ArrowUp':
+          e.preventDefault();
+          highlightedIndex = Math.max(highlightedIndex - 1, -1);
+          updateHighlight();
+          break;
+        case 'Enter':
+          e.preventDefault();
+          if (highlightedIndex >= 0 && items[highlightedIndex]) {
+            const font = filteredFonts[highlightedIndex];
+            selectedFont = font;
+            searchInput.value = font;
+            hideDropdown();
+            updateWeightOptions(font);
+            apply();
+          } else if (filteredFonts.length > 0) {
+            selectedFont = filteredFonts[0];
+            searchInput.value = filteredFonts[0];
+            hideDropdown();
+            updateWeightOptions(filteredFonts[0]);
+            apply();
+          }
+          break;
+        case 'Escape':
+          hideDropdown();
+          searchInput.blur();
+          break;
+      }
+    });
+    
+    // Hide dropdown when clicking outside
+    document.addEventListener('click', (e) => {
+      if (!dropdownContainer.contains(e.target)) {
+        hideDropdown();
+      }
     });
 
     const controls = document.createElement('div');
     controls.style.cssText = 'display:flex;gap:8px;margin-top:8px';
 
     const weightSel = document.createElement('select');
+    weightSel.className = 'gm-font-select';
     
-    // Function to update weight options based on selected font
     const updateWeightOptions = (fontFamily) => {
       const availableWeights = FONT_WEIGHTS[fontFamily] || [400];
       const currentWeight = weightSel.value;
       
-      // Clear existing options
       weightSel.innerHTML = '';
       
-      // Add available weights
       availableWeights.forEach(w => {
         const o = document.createElement('option');
         o.value = o.textContent = w;
         weightSel.appendChild(o);
       });
       
-      // Try to maintain current weight if it's available, otherwise use first available
+      // Use current weight if available, otherwise default to 400 or first available weight
       if (availableWeights.includes(parseInt(currentWeight))) {
         weightSel.value = currentWeight;
       } else {
@@ -295,21 +442,25 @@
     };
 
     const colorIn = document.createElement('input');
-    colorIn.type = 'color'; colorIn.value = '#f3f4f6';
+    colorIn.type = 'color'; 
+    colorIn.value = '#f3f4f6';
+    colorIn.className = 'gm-color-input';
 
     controls.append(weightSel, colorIn);
-    pane.append(familySel, controls);
+    pane.append(controls);
 
     const preview = document.createElement('p');
-    preview.textContent = 'Aa Quick Brown Fox';
-    preview.style.marginTop = '12px';    pane.appendChild(preview);
+    preview.textContent = 'Aa';
+    preview.style.cssText = 'margin-top:20px;font-size:18px;';
+    pane.appendChild(preview);
 
-    /* Reset button */
     const resetBtn = document.createElement('button');
     resetBtn.textContent = 'Reset to Defaults';
     resetBtn.className = 'gm-btn';
-    resetBtn.style.cssText = 'width:100%;margin-top:8px;background:#666;';
-    pane.appendChild(resetBtn);    const KEY = 'GMPlusFont';
+    resetBtn.style.cssText = 'width:100%;margin-top:16px;background:#666;';
+    pane.appendChild(resetBtn);
+    
+    const KEY = 'GMPlusFont';
     const defaults = { family: 'Mona Sans', weight: 400, color: '#f3f4f6' };
     
     // Initialize weight options for default font
@@ -317,26 +468,27 @@
     
     const saved = JSON.parse(localStorage.getItem(KEY) || '{}');
     if (saved.family) {
-      familySel.value = saved.family;
+      selectedFont = saved.family;
+      searchInput.value = saved.family;
       updateWeightOptions(saved.family);
       weightSel.value = saved.weight;
       colorIn.value = saved.color;
     } else {
-      familySel.value = defaults.family;
+      selectedFont = defaults.family;
+      searchInput.value = defaults.family;
+      updateWeightOptions(defaults.family);
       weightSel.value = defaults.weight;
       colorIn.value = defaults.color;
     }
 
-    // Update weights when font family changes
-    familySel.addEventListener('change', () => {
-      updateWeightOptions(familySel.value);
-      apply();
-    });    const apply = () => {
-      const fam = familySel.value;
+    // Update font weights when selection changes (handled by dropdown click events)
+    
+    const apply = () => {
+      const fam = selectedFont;
       const weight = weightSel.value;
       const color = colorIn.value;
 
-      preview.style.cssText = `font-family:${FONT_MAP[fam]};font-weight:${weight};color:${color}`;
+      preview.style.cssText = `margin-top:20px;font-size:18px;font-family:${FONT_MAP[fam]};font-weight:${weight};color:${color}`;
 
       const isDefault = (fam === defaults.family && 
                         parseInt(weightSel.value) === defaults.weight && 
@@ -374,7 +526,6 @@
           }
         }, 1000);
 
-        /* Apply global custom style - only font family, weight, and color */
         let st = $('#gm-font-style');
         if (!st) { st = document.createElement('style'); st.id = 'gm-font-style'; document.head.appendChild(st); }
         st.textContent =
@@ -385,16 +536,16 @@
     };
 
     const reset = () => {
-      familySel.value = defaults.family;
+      selectedFont = defaults.family;
+      searchInput.value = defaults.family;
       updateWeightOptions(defaults.family);
       weightSel.value = defaults.weight;
       colorIn.value = defaults.color;
       
-      /* Remove custom font style */
       const st = $('#gm-font-style');
       if (st) st.remove();
       
-      /* Clear localStorage */
+      // Clear localstorage
       localStorage.removeItem(KEY);
       
       console.log('[GM+ Font] Reset to defaults');
@@ -474,25 +625,23 @@
       }
     })();
   }
-  /* ========= Build UI once tray ready ========= */
+  
+  // Create UI
   (async () => {
     const tray  = await waitForTray();
     injectSidebarStyles();
     const paneFactory = buildSidebar();
 
-    /* create panes (order matters for index) */
     const fontPane   = paneFactory('fonts');   buildFontPane(fontPane);
     const cachePane  = paneFactory('cache');   buildCachePane(cachePane);
     const countPane  = paneFactory('counter'); Counter.init(countPane);
     const jumpPane   = paneFactory('jump');    buildJumpPane(jumpPane);
 
-    /* tray buttons */
     panes.push({ btn: addTrayBtn(tray, SVGs.font,  'Fonts',        () => open(0)), pane: fontPane  });
     panes.push({ btn: addTrayBtn(tray, SVGs.save,  'Cache',        () => open(1)), pane: cachePane });
     panes.push({ btn: addTrayBtn(tray, SVGs.bars,  'Msg Counter',  () => open(2)), pane: countPane });
     panes.push({ btn: addTrayBtn(tray, SVGs.rocket,'Quick Jump',   () => open(3)), pane: jumpPane  });
 
-    /* click‑outside to close */
     document.addEventListener('click', e => {
       if (sidebar && !sidebar.contains(e.target) && !e.target.classList.contains('gm-plus-btn')) {
         sidebar.classList.add('gm-hidden');
@@ -502,16 +651,52 @@
 
   })();
 
-  /* ========= open / close helpers ========= */
+  // open/close helpers
   function open(idx) {
+    const activeBtn = panes[idx].btn;
+    const btnRect = activeBtn.getBoundingClientRect();
+    
+    const viewportWidth = window.innerWidth;
+    const viewportHeight = window.innerHeight;
+    
     panes.forEach((p, i) => {
       p.btn.classList.toggle('active', i === idx);
       p.pane.style.display = i === idx ? 'block' : 'none';
     });
     sidebar.classList.remove('gm-hidden');
+    
+    requestAnimationFrame(() => {
+      const sidebarRect = sidebar.getBoundingClientRect();
+      const sidebarWidth = sidebarRect.width;
+      const sidebarHeight = sidebarRect.height;
+      
+      const gap = 8;
+      let left = btnRect.right + gap;
+      
+      if (left + sidebarWidth > viewportWidth) {
+        left = btnRect.left - sidebarWidth - gap;
+        
+        if (left < 0) {
+          left = gap;
+        }
+      }
+      
+      let top = btnRect.top;
+      
+      if (top + sidebarHeight > viewportHeight) {
+        top = viewportHeight - sidebarHeight - gap;
+        
+        if (top < gap) {
+          top = gap;
+        }
+      }
+      
+      sidebar.style.left = `${left}px`;
+      sidebar.style.top = `${top}px`;
+    });
   }
 
-  /* ========= message bus ========= */
+  // Message bus
   window.addEventListener('message', ev => {
     if (ev.source !== window) return;
     if (ev.data?.type === 'GM_MESSAGES') {
