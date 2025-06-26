@@ -1,6 +1,8 @@
 (function () {
   'use strict';
   
+  console.log('[GM+ Page Script] Loading page injection script...');
+  
   // Store for tracking message state and detecting edits
   const messageStore = new Map();
   let interceptCount = 0;
@@ -145,6 +147,18 @@
         interceptCount++;
         console.log(`📥 ${source.toUpperCase()}: ${newCount} new, ${editCount} edited, ${skippedCount} skipped (batch #${interceptCount})`);
         
+        // Debug: Show sample message structure for first message
+        if (interceptCount === 1 && Object.keys(processedMessages).length > 0) {
+          const sampleMsg = Object.values(processedMessages)[0];
+          console.log('📋 Sample cached message structure:', {
+            id: sampleMsg.id,
+            fields: Object.keys(sampleMsg),
+            hasAttachments: !!sampleMsg.attachments?.length,
+            hasReactions: !!sampleMsg.reactions?.length,
+            messageType: sampleMsg.message_type
+          });
+        }
+        
         // Send to content script
         window.postMessage({
           type: 'GM_MESSAGES',
@@ -230,6 +244,7 @@
       // User information
       user_id: rawMessage.user_id || rawMessage.sender_id,
       sender_id: rawMessage.sender_id || rawMessage.user_id,
+      sender_type: rawMessage.sender_type,
       name: rawMessage.name,
       avatar_url: rawMessage.avatar_url,
       
@@ -237,10 +252,25 @@
       group_id: rawMessage.group_id,
       conversation_id: rawMessage.conversation_id,
       
+      // System and event fields
+      system: rawMessage.system,
+      event: rawMessage.event,
+      
+      // Social engagement fields
+      favorited_by: rawMessage.favorited_by,
+      reactions: rawMessage.reactions,
+      
+      // Pinning information
+      pinned_at: rawMessage.pinned_at,
+      pinned_by: rawMessage.pinned_by,
+      
+      // Technical fields
+      source_guid: rawMessage.source_guid,
+      platform: rawMessage.platform || 'web',
+      
       // Message metadata
       source_url: url,
-      intercepted_at: Date.now(),
-      platform: rawMessage.platform || 'web'
+      intercepted_at: Date.now()
     };
     
     // Handle DMs
@@ -257,12 +287,52 @@
       }
     }
     
-    const optionalFields = [
-      'attachments', 'favorited_by', 'likes_count', 'mentions',
-      'system', 'event', 'subject', 'location'
+    // Handle attachments with full detail preservation
+    if (rawMessage.attachments && Array.isArray(rawMessage.attachments)) {
+      message.attachments = rawMessage.attachments.map(att => {
+        const attachment = {
+          type: att.type
+        };
+        
+        // Copy all attachment properties
+        const attachmentFields = [
+          'url', 'preview_url', 'name', 'size', 'width', 'height',
+          'user_id', 'reply_id', 'base_reply_id', 'latitude', 'longitude',
+          'name', 'foursquare_venue_id', 'video_url', 'video_preview_url',
+          'title', 'description', 'image_url', 'emoji', 'charmap'
+        ];
+        
+        attachmentFields.forEach(field => {
+          if (att[field] !== undefined && att[field] !== null) {
+            attachment[field] = att[field];
+          }
+        });
+        
+        return attachment;
+      }).filter(att => att.type); // Only keep attachments with a type
+    }
+    
+    // Handle likes count (derived from favorited_by)
+    if (message.favorited_by && Array.isArray(message.favorited_by)) {
+      message.likes_count = message.favorited_by.length;
+    }
+    
+    // Handle message type classification
+    if (rawMessage.system) {
+      message.message_type = 'system';
+    } else if (rawMessage.event) {
+      message.message_type = 'event';
+    } else {
+      message.message_type = 'user';
+    }
+    
+    // Copy any additional fields that might be present
+    const additionalFields = [
+      'mentions', 'location', 'subject', 'poll', 'calendar_event',
+      'image_url', 'video_url', 'audio_url', 'file_url'
     ];
     
-    optionalFields.forEach(field => {
+    additionalFields.forEach(field => {
       if (rawMessage[field] !== undefined && rawMessage[field] !== null) {
         if (Array.isArray(rawMessage[field])) {
           if (rawMessage[field].length > 0) {
@@ -273,27 +343,6 @@
         }
       }
     });
-    
-    if (rawMessage.system) {
-      message.system = true;
-      message.message_type = 'system';
-    } else if (rawMessage.event) {
-      message.event = rawMessage.event;
-      message.message_type = 'event';
-    } else {
-      message.message_type = 'user';
-    }
-
-    // Parse attachments
-    if (message.attachments && Array.isArray(message.attachments)) {
-      message.attachments = message.attachments.map(att => ({
-        type: att.type,
-        url: att.url,
-        preview_url: att.preview_url,
-        name: att.name,
-        size: att.size
-      })).filter(att => att.type && att.url);
-    }
     
     return message;
   }
@@ -326,4 +375,6 @@
   };
 
   const startTime = Date.now();
+  
+  console.log('[GM+ Page Script] Page injection script loaded and API interception active');
 })();

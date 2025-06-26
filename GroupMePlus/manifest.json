@@ -17,8 +17,13 @@
   "host_permissions": [
     "https://web.groupme.com/*",
     "https://api.groupme.com/*",
-    "https://fonts.googleapis.com/*"
+    "https://fonts.googleapis.com/*",
+    "https://fonts.gstatic.com/*"
   ],
+
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com;"
+  },
 
   "content_scripts": [
     {
@@ -27,7 +32,6 @@
       "js":      [
         "lz-string.min.js",
         "styles.js",
-        "page-inject.js",
         "groupme-plus.js"
       ]
     }
@@ -35,7 +39,7 @@
 
   "web_accessible_resources": [
     {
-      "resources": ["sidebar.css"],
+      "resources": ["sidebar.css", "page-inject.js"],
       "matches":   ["https://web.groupme.com/*"]
     }
   ]
