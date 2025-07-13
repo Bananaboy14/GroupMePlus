@@ -1137,23 +1137,232 @@
 
   // Panes for the tools
   const Counter = (() => {
-    let total = 0, group = null, lbl;
-    const handle = payload => {
-      const msgs = Object.values(payload || {});
-      if (!msgs.length) return;
-      const g = msgs[0].group_id || msgs[0].conversation_id;
-      if (g && g !== group) { group = g; total = 0; }
-      total += msgs.length;
-      if (lbl) lbl.textContent = `${total} msgs`;
-    };
+    // Legacy counter - now replaced with chat viewer functionality
+    const handle = () => {}; // No-op
     const init = pane => {
-      lbl = document.createElement('div');
-      lbl.style.font = '600 32px/1 monospace';
-      lbl.textContent = '—';
-      pane.appendChild(lbl);
+      buildChatViewerPane(pane);
     };
     return { handle, init };
   })();
+
+  function buildChatViewerPane(pane) {
+    pane.style.cssText = 'padding: 12px;';
+    
+    // Chat selection dropdown
+    const selectSection = document.createElement('div');
+    selectSection.style.cssText = 'margin-bottom: 16px; padding-bottom: 16px; border-bottom: 1px solid #333;';
+    
+    const selectTitle = document.createElement('h4');
+    selectTitle.textContent = 'Chat Viewer';
+    selectTitle.style.cssText = 'margin: 0 0 8px 0; color: #fff;';
+    
+    const chatSelect = document.createElement('select');
+    chatSelect.style.cssText = 'width: 100%; padding: 6px; border: 1px solid #444; border-radius: 4px; background: #2a2a2a; color: #fff; margin-bottom: 8px;';
+    const defaultOpt = document.createElement('option');
+    defaultOpt.value = '';
+    defaultOpt.textContent = 'Select Group or DM...';
+    chatSelect.appendChild(defaultOpt);
+    
+    const loadBtn = document.createElement('button');
+    loadBtn.textContent = 'Load Cached Messages';
+    loadBtn.className = 'gm-btn';
+    loadBtn.style.cssText = 'width: 100%; background: #28a745; margin-bottom: 8px;';
+    
+    const refetchBtn = document.createElement('button');
+    refetchBtn.textContent = 'Refetch All Messages';
+    refetchBtn.className = 'gm-btn';
+    refetchBtn.style.cssText = 'width: 100%; background: #17a2b8;';
+    
+    selectSection.append(selectTitle, chatSelect, loadBtn, refetchBtn);
+    pane.appendChild(selectSection);
+    
+    // Results display area
+    const resultsSection = document.createElement('div');
+    resultsSection.style.cssText = 'max-height: 400px; overflow-y: auto;';
+    pane.appendChild(resultsSection);
+    
+    // Populate chat dropdown (same as bulk fetch)
+    (async () => {
+      const headers = getAuthHeaders();
+      try {
+        const gResp = await fetch('https://api.groupme.com/v3/groups', { headers, credentials: 'omit' });
+        if (gResp.ok) {
+          const gd = await gResp.json();
+          (gd.response || []).forEach(g => {
+            const opt = document.createElement('option');
+            opt.value = `group:${g.id}`;
+            opt.textContent = g.name;
+            chatSelect.appendChild(opt);
+          });
+        }
+      } catch (e) { console.warn('Chat Viewer: failed to load groups', e); }
+      try {
+        const dResp = await fetch('https://api.groupme.com/v3/direct_messages?acceptFiles=1&limit=100', { headers, credentials: 'omit' });
+        if (dResp.ok) {
+          const dd = await dResp.json();
+          (dd.response || []).forEach(dm => {
+            const opt = document.createElement('option');
+            opt.value = `dm:${dm.other_user.id}`;
+            opt.textContent = dm.other_user.name;
+            chatSelect.appendChild(opt);
+          });
+        }
+      } catch (e) { console.warn('Chat Viewer: failed to load DMs', e); }
+    })();
+    
+    // Load cached messages for selected chat
+    loadBtn.onclick = async () => {
+      const sel = chatSelect.value;
+      if (!sel) return Modal.alert('Select Chat', 'Please select a group or direct message.', 'error');
+      if (!Cache) return Modal.alert('Cache Unavailable', 'Cache not available', 'error');
+      
+      loadBtn.disabled = true;
+      loadBtn.textContent = 'Loading...';
+      
+      try {
+        const [type, id] = sel.split(':');
+        const isGroup = type === 'group';
+        let messages = [];
+        
+        if (isGroup) {
+          messages = await Cache.search('', { groupId: id, limit: 1000 });
+        } else {
+          const allMessages = await Cache.all();
+          messages = allMessages.filter(msg => {
+            // Check if this message is from a DM with the specified user
+            return (msg.conversation_id && (
+              msg.user_id === id || 
+              msg.sender_id === id ||
+              (msg.recipients && msg.recipients.some(r => r.user_id === id))
+            )) || 
+            // Also check for group_id that might actually be a conversation_id for DMs
+            (msg.group_id && msg.group_id.toString() === id);
+          }).slice(0, 1000);
+        }
+        
+        if (!messages.length) {
+          resultsSection.innerHTML = '<div style="text-align: center; color: #888; padding: 20px;">No cached messages found for this chat.</div>';
+        } else {
+          const chatName = chatSelect.options[chatSelect.selectedIndex].textContent;
+          resultsSection.innerHTML = `
+            <div style="margin-bottom: 12px; padding: 8px; background: #333; border-radius: 4px;">
+              <strong style="color: #fff;">${chatName}</strong><br>
+              <span style="color: #888; font-size: 12px;">${messages.length} cached messages • ${isGroup ? 'Group' : 'Direct Message'}</span>
+            </div>
+            <div style="max-height: 300px; overflow-y: auto;">
+              ${messages.slice(0, 50).map(msg => `
+                <div style="background: #222; margin: 4px 0; padding: 8px; border-radius: 4px; border-left: 3px solid #667eea;">
+                  <div style="font-size: 12px; color: #888; margin-bottom: 4px;">
+                    ${msg.name || 'Unknown'} • ${new Date(msg.created_at * 1000).toLocaleString()}
+                  </div>
+                  <div style="font-size: 14px; color: #ddd;">
+                    ${(msg.text || '').substring(0, 150)}${msg.text && msg.text.length > 150 ? '...' : ''}
+                  </div>
+                  ${msg.attachments && msg.attachments.length > 0 ? `
+                    <div style="font-size: 11px; color: #888; margin-top: 4px;">
+                      📎 ${msg.attachments.length} attachment(s)
+                    </div>
+                  ` : ''}
+                </div>
+              `).join('')}
+              ${messages.length > 50 ? `
+                <div style="text-align: center; color: #888; padding: 8px; font-size: 12px;">
+                  Showing first 50 of ${messages.length} messages
+                </div>
+              ` : ''}
+            </div>
+          `;
+        }
+      } catch (error) {
+        console.error('[GM+ Chat Viewer] Load error:', error);
+        resultsSection.innerHTML = '<div style="text-align: center; color: #dc3545; padding: 20px;">Error loading messages</div>';
+      } finally {
+        loadBtn.disabled = false;
+        loadBtn.textContent = 'Load Cached Messages';
+      }
+    };
+    
+    // Refetch all messages for selected chat
+    refetchBtn.onclick = async () => {
+      const sel = chatSelect.value;
+      if (!sel) return Modal.alert('Select Chat', 'Please select a group or direct message.', 'error');
+      
+      refetchBtn.disabled = true;
+      const [type, id] = sel.split(':');
+      let beforeId = '';
+      let total = 0;
+      const headers = getAuthHeaders();
+      let retryCount = 0;
+      const maxRetries = 3;
+      
+      try {
+        refetchBtn.textContent = 'Fetching...';
+        while (true) {
+          let url = '';
+          if (type === 'group') {
+            url = `https://api.groupme.com/v3/groups/${id}/messages?acceptFiles=1&limit=100${beforeId?`&before_id=${beforeId}`:''}`;
+          } else {
+            url = `https://api.groupme.com/v3/direct_messages?acceptFiles=1&limit=100&other_user_id=${id}${beforeId?`&before_id=${beforeId}`:''}`;
+          }
+          
+          try {
+            const resp = await fetch(url, { headers, credentials: 'omit' });
+            
+            if (resp.status === 429) {
+              // Rate limited - wait and retry
+              if (retryCount < maxRetries) {
+                retryCount++;
+                const waitTime = Math.pow(2, retryCount) * 1000; // Exponential backoff
+                refetchBtn.textContent = `Rate limited, waiting ${waitTime/1000}s...`;
+                await new Promise(resolve => setTimeout(resolve, waitTime));
+                continue;
+              } else {
+                throw new Error('Rate limit exceeded after retries');
+              }
+            }
+            
+            if (!resp.ok) {
+              throw new Error(`HTTP ${resp.status}: ${resp.statusText}`);
+            }
+            
+            const jd = await resp.json();
+            const msgs = (jd.response && jd.response.messages) || jd.response || [];
+            if (!msgs.length) break;
+            
+            const batch = Object.fromEntries(msgs.map(m => [m.id, m]));
+            await Cache.store(batch);
+            total += msgs.length;
+            refetchBtn.textContent = `Fetched ${total} messages...`;
+            beforeId = msgs[msgs.length - 1].id;
+            retryCount = 0; // Reset retry count on success
+            
+            // Small delay to avoid overwhelming the API
+            await new Promise(resolve => setTimeout(resolve, 100));
+            
+          } catch (fetchError) {
+            if (retryCount < maxRetries && (fetchError.message.includes('fetch') || fetchError.message.includes('network'))) {
+              retryCount++;
+              const waitTime = Math.pow(2, retryCount) * 1000;
+              refetchBtn.textContent = `Network error, retrying in ${waitTime/1000}s...`;
+              await new Promise(resolve => setTimeout(resolve, waitTime));
+              continue;
+            } else {
+              throw fetchError;
+            }
+          }
+        }
+        Modal.alert('Refetch Complete', `Fetched and cached ${total} messages.`, 'info');
+        // Auto-reload the display
+        if (total > 0) loadBtn.click();
+      } catch (e) {
+        console.error('Chat Viewer refetch error', e);
+        Modal.alert('Error', `Refetch failed: ${e.message}`, 'error');
+      } finally {
+        refetchBtn.disabled = false;
+        refetchBtn.textContent = 'Refetch All Messages';
+      }
+    };
+  }
 
   function buildFontPane(pane) {
     const dropdownContainer = document.createElement('div');
@@ -1556,7 +1765,7 @@
     exportBtn.style.background = '#388e3c'; cleanupBtn.style.cssText = 'background: #f57c00; color: #000;'; clearBtn.style.background = '#dc3545';
     const btnContainer = document.createElement('div'); btnContainer.style.cssText = 'display: flex; flex-direction: column; gap: 8px;';
     btnContainer.append(statsBtn, exportBtn, cleanupBtn, clearBtn); pane.appendChild(btnContainer);
-    // Search functionality
+       // Search functionality
 
     const performSearch = async () => {
       const q = searchInput.value.trim(); if (!q) { searchResults.style.display = 'none'; return; }
@@ -2121,7 +2330,7 @@
 
     panes.push({ btn: addTrayBtn(tray, SVGs.font,  'Fonts',        () => open(0)), pane: fontPane  });
     panes.push({ btn: addTrayBtn(tray, SVGs.save,  'Cache',        () => open(1)), pane: cachePane });
-    panes.push({ btn: addTrayBtn(tray, SVGs.bars,  'Msg Counter',  () => open(2)), pane: countPane });
+    panes.push({ btn: addTrayBtn(tray, SVGs.bars,  'Chat Viewer',  () => open(2)), pane: countPane });
 
     let isDragging = false;
     let dragStartTarget = null;

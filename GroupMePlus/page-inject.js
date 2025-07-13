@@ -24,7 +24,7 @@
     return response;
   };
 
-  // Enhanced XMLHttpRequest interception
+  // XHR interception
   const originalXHROpen = XMLHttpRequest.prototype.open;
   XMLHttpRequest.prototype.open = function (method, url, ...rest) {
     if (isGroupMeAPI(url)) {
@@ -55,7 +55,7 @@
           handleRealtimeMessage(data);
         }
       } catch (err) {
-        // nothing
+        console.warn('📡 WebSocket intercept processing failed:', err);
       }
     });
     
