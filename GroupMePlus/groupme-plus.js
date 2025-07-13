@@ -1029,7 +1029,7 @@
     font: `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-type-icon lucide-type"><path d="M12 4v16"/><path d="M4 7V5a1 1 0 0 1 1-1h14a1 1 0 0 1 1 1v2"/><path d="M9 20h6"/></svg>`,
     save: `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-save-icon lucide-save"><path d="M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M17 21v-7a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v7"/><path d="M7 3v4a1 1 0 0 0 1 1h7"/></svg>`,
     bars: `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-hash-icon lucide-hash"><line x1="4" x2="20" y1="9" y2="9"/><line x1="4" x2="20" y1="15" y2="15"/><line x1="10" x2="8" y1="3" y2="21"/><line x1="16" x2="14" y1="3" y2="21"/></svg>`,
-    rocket:`<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-fast-forward-icon lucide-fast-forward"><polygon points="13 19 22 12 13 5 13 19"/><polygon points="2 19 11 12 2 5 2 19"/></svg>`
+    // Quick Jump SVG removed
   };
   let sidebar, panes = [];
 
@@ -1436,210 +1436,184 @@
 
   function buildCachePane(pane) {
     pane.classList.add('gm-cache-pane');
-    
+
+    // Bulk Fetch section: select a group or DM and fetch all messages
+    const bulkSection = document.createElement('div');
+    bulkSection.style.cssText = 'margin-bottom:16px;padding-bottom:16px;border-bottom:1px solid #333;';
+    const bulkTitle = document.createElement('h4');
+    bulkTitle.textContent = 'Bulk Fetch';
+    bulkTitle.style.cssText = 'margin:0 0 8px 0;color:#fff;';
+    const convSelect = document.createElement('select');
+    convSelect.style.cssText = 'width:100%;padding:6px;border:1px solid #444;border-radius:4px;background:#2a2a2a;color:#fff;margin-bottom:8px;';
+    const defaultOption = document.createElement('option'); defaultOption.value = ''; defaultOption.textContent = 'Select Group or DM...';
+    convSelect.appendChild(defaultOption);
+    const fetchBtn = document.createElement('button');
+    fetchBtn.textContent = 'Fetch All Messages';
+    fetchBtn.className = 'gm-btn';
+    fetchBtn.style.cssText = 'width:100%;background:#17a2b8;margin-bottom:12px;';
+    bulkSection.append(bulkTitle, convSelect, fetchBtn);
+    pane.appendChild(bulkSection);
+
+    // Populate conversation list (groups and DMs)
+    (async () => {
+      const headers = getAuthHeaders();
+      try {
+        const gResp = await fetch('https://api.groupme.com/v3/groups', { headers, credentials: 'omit' });
+        if (gResp.ok) {
+          const gd = await gResp.json();
+          (gd.response || []).forEach(g => {
+            const opt = document.createElement('option');
+            opt.value = `group:${g.id}`;
+            opt.textContent = g.name;
+            convSelect.appendChild(opt);
+          });
+        }
+      } catch (e) { console.warn('Bulk Fetch: failed to load groups', e); }
+      try {
+        const dResp = await fetch('https://api.groupme.com/v3/direct_messages?acceptFiles=1&limit=100', { headers, credentials: 'omit' });
+        if (dResp.ok) {
+          const dd = await dResp.json();
+          (dd.response || []).forEach(dm => {
+            const opt = document.createElement('option');
+            opt.value = `dm:${dm.other_user.id}`;
+            opt.textContent = dm.other_user.name;
+            convSelect.appendChild(opt);
+          });
+        }
+      } catch (e) { console.warn('Bulk Fetch: failed to load DMs', e); }
+    })();
+
+    // Fetch and cache all messages on button click
+    fetchBtn.onclick = async () => {
+      const sel = convSelect.value;
+      if (!sel) return Modal.alert('Select Conversation', 'Please select a group or direct message.', 'error');
+      fetchBtn.disabled = true;
+      let [type, id] = sel.split(':');
+      let beforeId = '';
+      let total = 0;
+      const headers = getAuthHeaders();
+      try {
+        while (true) {
+          let url = '';
+          if (type === 'group') {
+            url = `https://api.groupme.com/v3/groups/${id}/messages?acceptFiles=1&limit=100${beforeId?`&before_id=${beforeId}`:''}`;
+          } else {
+            url = `https://api.groupme.com/v3/direct_messages?acceptFiles=1&limit=100&other_user_id=${id}${beforeId?`&before_id=${beforeId}`:''}`;
+          }
+          const resp = await fetch(url, { headers, credentials: 'omit' });
+          if (!resp.ok) break;
+          const jd = await resp.json();
+          const msgs = (jd.response && jd.response.messages) || jd.response || [];
+          if (!msgs.length) break;
+          const batch = Object.fromEntries(msgs.map(m => [m.id, m]));
+          await Cache.store(batch);
+          total += msgs.length;
+          fetchBtn.textContent = `Fetched ${total} messages...`;
+          beforeId = msgs[msgs.length - 1].id;
+          // immediate next request, no artificial delay
+        }
+        Modal.alert('Fetch Complete', `Fetched and cached ${total} messages.`, 'info');
+      } catch (e) {
+        console.error('Bulk Fetch error', e);
+        Modal.alert('Error', `Fetch failed: ${e.message}`, 'error');
+      } finally {
+        fetchBtn.disabled = false;
+        fetchBtn.textContent = 'Fetch All Messages';
+      }
+    };
+
     const searchSection = document.createElement('div');
     searchSection.style.cssText = 'margin-bottom: 16px; padding-bottom: 16px; border-bottom: 1px solid #333;';
-    
     const searchInput = document.createElement('input');
     searchInput.type = 'text';
     searchInput.placeholder = 'Search messages...';
     searchInput.className = 'gm-search-input';
     searchInput.style.marginBottom = '8px';
-    
     const searchOptions = document.createElement('div');
     searchOptions.style.cssText = 'display: flex; gap: 12px; margin-bottom: 8px; font-size: 13px;';
-    
     const caseSensitiveLabel = document.createElement('label');
     caseSensitiveLabel.style.cssText = 'display: flex; align-items: center; gap: 4px; color: #ddd; cursor: pointer;';
-    const caseSensitiveCheck = document.createElement('input');
-    caseSensitiveCheck.type = 'checkbox';
-    caseSensitiveCheck.id = 'gm-case-sensitive';
-    caseSensitiveLabel.appendChild(caseSensitiveCheck);
-    caseSensitiveLabel.appendChild(document.createTextNode('Case sensitive'));
-    
+    const caseSensitiveCheck = document.createElement('input'); caseSensitiveCheck.type = 'checkbox'; caseSensitiveCheck.id = 'gm-case-sensitive';
+    caseSensitiveLabel.append(caseSensitiveCheck, document.createTextNode('Case sensitive'));
     const fullWordLabel = document.createElement('label');
     fullWordLabel.style.cssText = 'display: flex; align-items: center; gap: 4px; color: #ddd; cursor: pointer;';
-    const fullWordCheck = document.createElement('input');
-    fullWordCheck.type = 'checkbox';
-    fullWordCheck.id = 'gm-full-word';
-    fullWordLabel.appendChild(fullWordCheck);
-    fullWordLabel.appendChild(document.createTextNode('Full word'));
-    
+    const fullWordCheck = document.createElement('input'); fullWordCheck.type = 'checkbox'; fullWordCheck.id = 'gm-full-word';
+    fullWordLabel.append(fullWordCheck, document.createTextNode('Full word'));
     searchOptions.append(caseSensitiveLabel, fullWordLabel);
-    
-    const searchBtn = document.createElement('button');
-    searchBtn.textContent = 'Search';
-    searchBtn.className = 'gm-btn';
+    const searchBtn = document.createElement('button'); searchBtn.textContent = 'Search'; searchBtn.className = 'gm-btn';
     searchBtn.style.cssText = 'margin-right: 8px; background: #28a745;';
-    
     const searchResults = document.createElement('div');
     searchResults.style.cssText = 'max-height: 300px; overflow-y: auto; margin-top: 8px; display: none;';
-    
     searchSection.append(searchInput, searchOptions, searchBtn, searchResults);
     pane.appendChild(searchSection);
 
-    // Main MessageCacher action buttons
-    const statsBtn  = document.createElement('button'); statsBtn.textContent = 'Show Stats';
+    // Action buttons
+    const statsBtn = document.createElement('button'); statsBtn.textContent = 'Show Stats';
     const exportBtn = document.createElement('button'); exportBtn.textContent = 'Export CSV';
     const cleanupBtn = document.createElement('button'); cleanupBtn.textContent = 'Cleanup Old Data';
-    const clearBtn  = document.createElement('button'); clearBtn.textContent = 'Clear Cache';
+    const clearBtn = document.createElement('button'); clearBtn.textContent = 'Clear Cache';
     [statsBtn, exportBtn, cleanupBtn, clearBtn].forEach(b => b.className = 'gm-btn');
-    exportBtn.style.background = '#388e3c';
-    cleanupBtn.style.background = '#f57c00';
-    cleanupBtn.style.color = '#000';
-    clearBtn.style.background = '#dc3545';
-    
-    const buttonContainer = document.createElement('div');
-    buttonContainer.style.cssText = 'display: flex; flex-direction: column; gap: 8px;';
-    buttonContainer.append(statsBtn, exportBtn, cleanupBtn, clearBtn);
-    pane.appendChild(buttonContainer);
+    exportBtn.style.background = '#388e3c'; cleanupBtn.style.cssText = 'background: #f57c00; color: #000;'; clearBtn.style.background = '#dc3545';
+    const btnContainer = document.createElement('div'); btnContainer.style.cssText = 'display: flex; flex-direction: column; gap: 8px;';
+    btnContainer.append(statsBtn, exportBtn, cleanupBtn, clearBtn); pane.appendChild(btnContainer);
+    // Search functionality
 
-    // MessageCacher search functionality
     const performSearch = async () => {
-      const query = searchInput.value.trim();
-      if (!query) {
-        searchResults.style.display = 'none';
-        return;
-      }
-      
-      if (!Cache) {
-        Modal.alert('Cache Unavailable', 'Cache not available - LZString library not loaded', 'error');
-        return;
-      }
-      
-      try {
-        searchBtn.textContent = 'Searching...';
-        searchBtn.disabled = true;
-        
-        const results = await Cache.search(query, { 
-          limit: 50,
-          caseSensitive: caseSensitiveCheck.checked,
-          fullWord: fullWordCheck.checked
-        });
-        
-        if (results.length === 0) {
-          searchResults.innerHTML = '<div style="color: #888; text-align: center; padding: 16px;">No messages found</div>';
-        } else {
-          searchResults.innerHTML = results.map(msg => {
-            const attachmentInfo = msg.attachments && msg.attachments.length > 0 
-              ? `<div style="font-size: 11px; color: #888; margin-top: 4px;">
-                   📎 ${msg.attachments.length} attachment(s): ${msg.attachments.map(att => att.type || 'unknown').join(', ')}
-                 </div>`
-              : '';
-            
-            const canJump = msg.group_id || msg.conversation_id;
-            const resultId = `search-result-${msg.id}`;
-              
-            if (canJump) {
-              setTimeout(() => {
-                const element = document.getElementById(resultId);
-                if (element) {
-                  element.style.cursor = 'pointer';
-                  element.addEventListener('click', () => {
-                    jumpToMessage(msg.id, msg.group_id || '', msg.conversation_id || '');
-                  });
-                }
-              }, 0);
-            }
-              
-            return `
-              <div id="${resultId}" style="background: #222; margin: 4px 0; padding: 8px; border-radius: 4px; border-left: 3px solid #667eea;" 
-                   ${canJump ? 'title="Click to jump to this message"' : ''}>
-                <div style="font-size: 12px; color: #888; margin-bottom: 4px;">
-                  ${msg.name || 'Unknown'} • ${new Date(msg.created_at * 1000).toLocaleString()}
-                  ${canJump ? ' • <span style="color: #667eea;">Click to jump to message</span>' : ''}
-                </div>
-                <div style="font-size: 14px; color: #ddd;">
-                  ${(msg.text || '').substring(0, 100)}${msg.text && msg.text.length > 100 ? '...' : ''}
-                </div>
-                ${attachmentInfo}
-              </div>
-            `;
-          }).join('');
-        }
-        
-        searchResults.style.display = 'block';
-      } catch (error) {
-        console.error('[GM+ Cache] Search error:', error);
-        searchResults.innerHTML = '<div style="color: #dc3545; text-align: center; padding: 16px;">Search failed</div>';
-        searchResults.style.display = 'block';
-      } finally {
-        searchBtn.textContent = 'Search';
-        searchBtn.disabled = false;
-      }
+      const q = searchInput.value.trim(); if (!q) { searchResults.style.display = 'none'; return; }
+      if (!Cache) { Modal.alert('Cache Unavailable','Cache not available','error'); return; }
+      searchBtn.disabled = true; searchBtn.textContent = 'Searching...';
+      const results = await Cache.search(q,{ limit:50, caseSensitive: caseSensitiveCheck.checked, fullWord: fullWordCheck.checked });
+      if (!results.length) searchResults.innerHTML = '<div style="color:#888;text-align:center;padding:16px;">No messages found</div>';
+      else searchResults.innerHTML = results.map(msg=>{
+        const attachmentInfo = msg.attachments?.length ? `<div style="font-size:11px;color:#888;margin-top:4px;">📎 ${msg.attachments.length} attachments: ${msg.attachments.map(a=>a.type||'').join(', ')}</div>` : '';
+        return `<div style="background:#222;margin:4px 0;padding:8px;border-radius:4px;border-left:3px solid #667eea;"><div style="font-size:12px;color:#888;margin-bottom:4px;">${msg.name||'Unknown'} • ${new Date(msg.created_at*1000).toLocaleString()}</div><div style="font-size:14px;color:#ddd;">${(msg.text||'').substring(0,100)}${msg.text.length>100?'...':''}</div>${attachmentInfo}</div>`;
+      }).join('');
+      searchResults.style.display = 'block';
+      searchBtn.disabled = false; searchBtn.textContent = 'Search';
     };
-
-    searchBtn.onclick = performSearch;
-    searchInput.addEventListener('keypress', (e) => {
-      if (e.key === 'Enter') performSearch();
-    });
-
-    statsBtn.onclick = async () => {
-      try {
-        if (!Cache) {
-          Modal.alert('Cache Unavailable', 'Cache not available - LZString library not loaded', 'error');
-          return;
-        }
-        const s = await Cache.stats();
-        Modal.stats('Cache Statistics', s);
-      } catch (error) {
-        console.error('[GM+ Cache] Stats error:', error);
-        Modal.alert('Error', `Error getting cache stats:\n\n${error.message}`, 'error');
-      }
-    };
-    
+    searchBtn.onclick = performSearch; searchInput.addEventListener('keypress',e=>{ if(e.key==='Enter')performSearch(); });
+    statsBtn.onclick = async()=>{ const s=await Cache.stats(); Modal.stats('Cache Statistics',s); };
     exportBtn.onclick = async () => {
       try {
         if (!Cache) {
           Modal.alert('Cache Unavailable', 'Cache not available - LZString library not loaded', 'error');
           return;
         }
-        
         exportBtn.textContent = 'Exporting...';
         exportBtn.disabled = true;
-        
         const msgs = await Cache.all();
         if (!msgs.length) {
           Modal.alert('No Data', 'Cache is empty. No messages to export.', 'info');
           return;
         }
-        
-        const csvHeaders = [
-          'ID', 'Name', 'Message', 'Timestamp', 'Group ID', 'User ID', 'Sender Type',
-          'System', 'Message Type', 'Likes Count', 'Reactions', 'Pinned At', 'Pinned By',
-          'Platform', 'Avatar URL', 'Updated At', 'Source GUID', 'Attachments'
-        ];
-        
+        const csvHeaders = ['ID','Name','Message','Timestamp','Group ID','User ID','Sender Type','System','Message Type','Likes Count','Reactions','Pinned At','Pinned By','Platform','Avatar URL','Updated At','Source GUID','Attachments'];
         const csvRows = msgs.map(m => [
-          `"${(m.id || '').toString().replace(/"/g,'""')}"`,
-          `"${(m.name || '').replace(/"/g,'""')}"`,
-          `"${(m.text || '').replace(/"/g,'""')}"`,
-          m.created_at ? new Date(m.created_at * 1000).toISOString() : '',
-          `"${(m.group_id || '').toString().replace(/"/g,'""')}"`,
-          `"${(m.user_id || '').toString().replace(/"/g,'""')}"`,
-          `"${(m.sender_type || '').replace(/"/g,'""')}"`,
+          `"${(m.id||'').replace(/"/g,'""')}"`,
+          `"${(m.name||'').replace(/"/g,'""')}"`,
+          `"${(m.text||'').replace(/"/g,'""')}"`,
+          m.created_at ? new Date(m.created_at*1000).toISOString() : '',
+          `"${(m.group_id||'').replace(/"/g,'""')}"`,
+          `"${(m.user_id||'').replace(/"/g,'""')}"`,
+          `"${(m.sender_type||'').replace(/"/g,'""')}"`,
           m.system ? 'true' : 'false',
-          `"${(m.message_type || '').replace(/"/g,'""')}"`,
-          (m.likes_count || 0).toString(),
-          `"${m.reactions ? JSON.stringify(m.reactions).replace(/"/g,'""') : ''}"`,
-          m.pinned_at ? new Date(m.pinned_at * 1000).toISOString() : '',
-          `"${(m.pinned_by || '').replace(/"/g,'""')}"`,
-          `"${(m.platform || '').replace(/"/g,'""')}"`,
-          `"${(m.avatar_url || '').replace(/"/g,'""')}"`,
-          m.updated_at ? new Date(m.updated_at * 1000).toISOString() : '',
-          `"${(m.source_guid || '').replace(/"/g,'""')}"`,
-          `"${m.attachments ? JSON.stringify(m.attachments).replace(/"/g,'""') : ''}"`
+          `"${(m.message_type||'').replace(/"/g,'""')}"`,
+          (m.likes_count||0).toString(),
+          `"${m.reactions?JSON.stringify(m.reactions).replace(/"/g,'""'):''}"`,
+          m.pinned_at?new Date(m.pinned_at*1000).toISOString():'',
+          `"${(m.pinned_by||'').replace(/"/g,'""')}"`,
+          `"${(m.platform||'').replace(/"/g,'""')}"`,
+          `"${(m.avatar_url||'').replace(/"/g,'""')}"`,
+          m.updated_at?new Date(m.updated_at*1000).toISOString():'',
+          `"${(m.source_guid||'').replace(/"/g,'""')}"`,
+          `"${m.attachments?JSON.stringify(m.attachments).replace(/"/g,'""'):''}"`
         ].join(','));
-        
         const csv = [csvHeaders.join(','), ...csvRows].join('\r\n');
-        const blob = new Blob([csv], { type:'text/csv' });
+        const blob = new Blob([csv], { type: 'text/csv' });
         const a = document.createElement('a');
         a.href = URL.createObjectURL(blob);
         a.download = `groupme_export_${Date.now()}.csv`;
         a.click();
-        
-        console.log(`[GM+ Cache] Exported ${msgs.length} messages to CSV`);
-        Modal.alert('Export Complete', `Successfully exported ${msgs.length.toLocaleString()} messages to file groupme_export_${Date.now()}.csv`, 'info');
+        Modal.alert('Export Complete', `Successfully exported ${msgs.length.toLocaleString()} messages to CSV`, 'info');
       } catch (error) {
         console.error('[GM+ Cache] Export error:', error);
         Modal.alert('Export Error', `Error exporting cache:\n\n${error.message}`, 'error');
@@ -1648,27 +1622,22 @@
         exportBtn.disabled = false;
       }
     };
-
     cleanupBtn.onclick = async () => {
       try {
         if (!Cache) {
           Modal.alert('Cache Unavailable', 'Cache not available - LZString library not loaded', 'error');
           return;
         }
-        
         cleanupBtn.textContent = 'Analyzing...';
         cleanupBtn.disabled = true;
-        
         const dryRun = await Cache.cleanup({ olderThanDays: 30, dryRun: true });
-        
         if (dryRun.deleted === 0) {
           Modal.alert('No Cleanup Needed', 'No old messages found to clean up.', 'info');
           return;
         }
-        
         Modal.confirm(
           'Cleanup Old Data',
-          `Found ${dryRun.deleted.toLocaleString()} messages older than 30 days.\n\nDo you want to delete them to free up space?\n\nThis action cannot be undone.`,
+          `Found ${dryRun.deleted.toLocaleString()} messages older than 30 days. This action cannot be undone.`,
           async () => {
             try {
               cleanupBtn.textContent = 'Cleaning...';
@@ -1688,37 +1657,23 @@
         cleanupBtn.disabled = false;
       }
     };
-
     clearBtn.onclick = async () => {
       Modal.confirm(
         'Clear Cache',
-        'Are you sure you want to clear all cached messages?\n\nThis action cannot be undone and will permanently delete all stored messages and edit history.',
+        'Are you sure you want to clear all cached messages? This action cannot be undone.',
         async () => {
           try {
             if (!Cache) {
               Modal.alert('Cache Unavailable', 'Cache not available - LZString library not loaded', 'error');
               return;
             }
-            
             const db = await Cache.open();
             const tx = db.transaction(['messages', 'editHistory'], 'readwrite');
-            
             await Promise.all([
-              new Promise((resolve, reject) => {
-                const req = tx.objectStore('messages').clear();
-                req.onsuccess = () => resolve();
-                req.onerror = () => reject(req.error);
-              }),
-              new Promise((resolve, reject) => {
-                const req = tx.objectStore('editHistory').clear();
-                req.onsuccess = () => resolve();
-                req.onerror = () => reject(req.error);
-              })
+              new Promise((resolve, reject) => { const r = tx.objectStore('messages').clear(); r.onsuccess = () => resolve(); r.onerror = () => reject(r.error); }),
+              new Promise((resolve, reject) => { const r = tx.objectStore('editHistory').clear(); r.onsuccess = () => resolve(); r.onerror = () => reject(r.error); })
             ]);
-            
             Modal.alert('Cache Cleared', 'Cache cleared successfully.', 'info');
-            
-            // Clear search results
             searchResults.style.display = 'none';
             searchInput.value = '';
           } catch (error) {
@@ -2163,12 +2118,10 @@
     const fontPane   = paneFactory('fonts');   buildFontPane(fontPane);
     const cachePane  = paneFactory('cache');   buildCachePane(cachePane);
     const countPane  = paneFactory('counter'); Counter.init(countPane);
-    const jumpPane   = paneFactory('jump');    buildJumpPane(jumpPane);
 
     panes.push({ btn: addTrayBtn(tray, SVGs.font,  'Fonts',        () => open(0)), pane: fontPane  });
     panes.push({ btn: addTrayBtn(tray, SVGs.save,  'Cache',        () => open(1)), pane: cachePane });
     panes.push({ btn: addTrayBtn(tray, SVGs.bars,  'Msg Counter',  () => open(2)), pane: countPane });
-    panes.push({ btn: addTrayBtn(tray, SVGs.rocket,'Quick Jump',   () => open(3)), pane: jumpPane  });
 
     let isDragging = false;
     let dragStartTarget = null;
