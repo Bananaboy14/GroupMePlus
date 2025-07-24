@@ -36,7 +36,16 @@
     const l = document.createElement('link');
     l.rel = 'stylesheet';
     l.href = href;
-    l.onerror = () => console.error(`[GM+ Font] CSS failed to load: ${href}`);
+    l.onerror = (error) => {
+      console.error(`[GM+ Font] CSS failed to load: ${href}`, error);
+      // Check if it's a CSP issue
+      if (href.includes('fonts.googleapis.com')) {
+        console.warn('[GM+ Font] Google Fonts blocked by CSP - check manifest.json content_security_policy');
+      }
+    };
+    l.onload = () => {
+      console.log(`[GM+ Font] CSS loaded successfully: ${href}`);
+    };
     document.head.appendChild(l);
   };
 
@@ -297,6 +306,7 @@
           const tx = db.transaction(STORE);
           const store = tx.objectStore(STORE);
           let cursor;
+          let processedCount = 0;
           
           // Use index if filtering by group
           if (groupId) {
@@ -308,9 +318,12 @@
           cursor.onsuccess = (event) => {
             const cur = event.target.result;
             if (!cur || results.length >= limit) {
+              console.log(`[GM+ Search Debug] Processed ${processedCount} total messages, found ${results.length} matching results`);
               resolve(results);
               return;
             }
+            
+            processedCount++;
             
             try {
               const msg = D(cur.value.data);
@@ -380,7 +393,7 @@
           const range = IDBKeyRange.bound([groupId, 0], [groupId, Date.now()]);
           const results = [];
           
-          const cursor = index.openCursor(range, 'prev'); // Latest first
+          const cursor = index.openCursor(range, 'prev');
           
           cursor.onsuccess = (event) => {
             const cur = event.target.result;
@@ -420,7 +433,6 @@
           cursor.onsuccess = (event) => {
             const cur = event.target.result;
             if (!cur) {
-              // Sort by timestamp
               results.sort((a, b) => a.edit_timestamp - b.edit_timestamp);
               resolve(results);
               return;
@@ -548,24 +560,20 @@
 
   console.log('[GM+ Cache] Cache system initialized:', Cache ? 'enabled' : 'disabled');
 
-  // Smart Incremental Fetching System
   const SmartFetch = (() => {
     if (!Cache) {
       console.warn('[GM+ SmartFetch] Cache not available, smart fetching disabled');
       return null;
     }
 
-    // Get cache boundaries for a specific group/DM
     const getCacheBoundaries = async (chatId, isDM = false) => {
       try {
         console.log(`[GM+ SmartFetch] Analyzing cache boundaries for ${isDM ? 'DM' : 'group'} ${chatId}`);
         
         let cached = [];
         if (isDM) {
-          // For DMs, search all messages and filter by conversation participants
           const allMessages = await Cache.all();
           cached = allMessages.filter(msg => {
-            // Check if this message involves the specified user in a DM context
             return (msg.is_dm || msg.conversation_id) && (
               msg.user_id === chatId || 
               msg.sender_id === chatId ||
@@ -574,7 +582,6 @@
             );
           });
         } else {
-          // For groups, load entire cache and filter by group_id to avoid limit
           try {
             const allMsgs = await Cache.all();
             cached = allMsgs.filter(msg => msg.group_id === chatId);
@@ -589,7 +596,6 @@
           return { newest: null, oldest: null, count: 0, hasCache: false };
         }
 
-        // Sort by created_at to find boundaries
         const sorted = cached.sort((a, b) => b.created_at - a.created_at);
         const newest = sorted[0];
         const oldest = sorted[sorted.length - 1];
@@ -610,10 +616,9 @@
       }
     };
 
-    // Fetch messages since a specific message ID
     const fetchSince = async (type, chatId, sinceMessageId, sinceTimestamp) => {
       const headers = getAuthHeaders();
-      let beforeId = null; // Start from newest
+      let beforeId = null;
       let newMessages = [];
       let totalFetched = 0;
       let batchCount = 0;
@@ -638,7 +643,6 @@
             
             if (!resp.ok) {
               if (resp.status === 429) {
-                // Rate limited - exponential backoff
                 retryCount++;
                 if (retryCount > maxRetries) {
                   console.error(`[GM+ SmartFetch] Rate limit exceeded after ${maxRetries} retries`);
@@ -648,8 +652,8 @@
                 const backoffTime = Math.pow(1.5, retryCount) * 1000;
                 console.warn(`[GM+ SmartFetch] Rate limited (429), retrying in ${backoffTime}ms (attempt ${retryCount}/${maxRetries})`);
                 await new Promise(resolve => setTimeout(resolve, backoffTime));
-                batchCount--; // Don't count this as a batch
-                continue; // Retry the same request
+                batchCount--;
+                continue;
               } else if (resp.status === 304) {
                 console.log(`[GM+ SmartFetch] No more messages (304)`);
                 break;
@@ -659,7 +663,6 @@
               }
             }
 
-            // Reset retry count on success
             retryCount = 0;
 
             const jd = await resp.json();
@@ -679,7 +682,6 @@
             totalFetched += msgs.length;
             console.log(`[GM+ SmartFetch] Batch ${batchCount}: ${msgs.length} messages (total: ${totalFetched})`);
 
-            // Check if we've reached our cached boundary
             let hitBoundary = false;
             let newBatchMessages = [];
 
@@ -699,21 +701,17 @@
               break;
             }
 
-            // Set up for next batch
             beforeId = msgs[msgs.length - 1].id;
 
-            // Safety limit to prevent infinite loops
             if (batchCount > 500) {
               console.warn(`[GM+ SmartFetch] Hit safety limit of 500 batches`);
               break;
             }
 
-            // Small delay to be nice to the API
             await new Promise(resolve => setTimeout(resolve, 10));
             
           } catch (error) {
             if (error.name === 'TypeError' && error.message.includes('fetch')) {
-              // Network error - treat like rate limit
               retryCount++;
               if (retryCount > maxRetries) {
                 console.error(`[GM+ SmartFetch] Network error after ${maxRetries} retries:`, error);
@@ -723,10 +721,9 @@
               const backoffTime = Math.pow(1.5, retryCount) * 1000;
               console.warn(`[GM+ SmartFetch] Network error, retrying in ${backoffTime}ms (attempt ${retryCount}/${maxRetries}):`, error.message);
               await new Promise(resolve => setTimeout(resolve, backoffTime));
-              batchCount--; // Don't count this as a batch
-              continue; // Retry the same request
+              batchCount--;
+              continue;
             } else {
-              // Other errors - rethrow
               throw error;
             }
           }
@@ -906,7 +903,6 @@
       
       if (groupId) {
         console.log(`[GM+ Jump] Verifying access to group ${groupId}`);
-        // Try to verify group access with proper authentication
         try {
           const response = await fetch(`https://api.groupme.com/v3/groups/${groupId}`, {
             method: 'GET',
@@ -927,7 +923,6 @@
         }
       } else if (conversationId) {
         console.log(`[GM+ Jump] Navigating to conversation ${conversationId}`);
-        // Navigate directly to avoid CORS issues
         window.location.href = `https://web.groupme.com/chats/${conversationId}`;
       } else {
         throw new Error('No group ID or conversation ID provided');
@@ -1127,6 +1122,68 @@
   const Modal = (() => {
     let currentModal = null;
 
+    const repositionModal = (modal) => {
+      const rect = modal.getBoundingClientRect();
+      const viewportHeight = window.innerHeight;
+      const viewportWidth = window.innerWidth;
+      
+      if (rect.bottom > viewportHeight || rect.top < 0) {
+        let newTop = Math.max(20, (viewportHeight - rect.height) / 2);
+        
+        if (rect.height > viewportHeight - 40) {
+          newTop = 20;
+        }
+        
+        modal.style.top = `${newTop}px`;
+        modal.style.transform = 'translate(-50%, 0)';
+      }
+      
+      if (rect.right > viewportWidth || rect.left < 0) {
+        let newLeft = Math.max(20, (viewportWidth - rect.width) / 2);
+        modal.style.left = `${newLeft}px`;
+        modal.style.transform = modal.style.transform.replace('translate(-50%', 'translate(0');
+      }
+    };
+
+    const setupModalRepositioning = (modal) => {
+      setTimeout(() => repositionModal(modal), 100);
+      
+      const observer = new MutationObserver(() => {
+        requestAnimationFrame(() => {
+          repositionModal(modal);
+        });
+      });
+      
+      observer.observe(modal, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ['style', 'class']
+      });
+      
+      const originalClose = currentModal?.close;
+      if (originalClose) {
+        currentModal.close = () => {
+          observer.disconnect();
+          originalClose();
+        };
+      }
+      
+      const handleResize = () => repositionModal(modal);
+      window.addEventListener('resize', handleResize);
+      
+      setTimeout(() => {
+        if (currentModal?.close) {
+          const originalClose = currentModal.close;
+          currentModal.close = () => {
+            window.removeEventListener('resize', handleResize);
+            observer.disconnect();
+            originalClose();
+          };
+        }
+      }, 50);
+    };
+
     const create = () => {
       const overlay = document.createElement('div');
       overlay.className = 'gm-modal-overlay';
@@ -1169,15 +1226,21 @@
         overlay.offsetHeight;
         setTimeout(() => {
           overlay.classList.add('show');
+          // Set up modal repositioning observer
+          setupModalRepositioning(modal);
         }, 10);
-        currentModal = { overlay, close: () => {
-          document.removeEventListener('keydown', handleEscape);
-          overlay.classList.remove('show');
-          setTimeout(() => {
-            if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
-          }, 200);
-          currentModal = null;
-        }};
+        currentModal = { 
+          overlay, 
+          modal,
+          close: () => {
+            document.removeEventListener('keydown', handleEscape);
+            overlay.classList.remove('show');
+            setTimeout(() => {
+              if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+            }, 200);
+            currentModal = null;
+          }
+        };
       };
       
       return { overlay, modal, header, title, closeBtn, body, footer, show };
@@ -1267,7 +1330,24 @@
       setTimeout(() => okBtn.focus(), 100);
     };
 
-    return { alert, confirm, stats, close };
+    const analytics = (titleText, content) => {
+      const { title, body, footer, show } = create();
+      
+      title.textContent = titleText;
+      body.innerHTML = content; // Direct content without wrapper
+      
+      const okBtn = document.createElement('button');
+      okBtn.className = 'gm-modal-btn primary';
+      okBtn.textContent = 'Close';
+      okBtn.onclick = close;
+      
+      footer.appendChild(okBtn);
+      show();
+      
+      setTimeout(() => okBtn.focus(), 100);
+    };
+
+    return { alert, confirm, stats, analytics, close };
   })();
 
   const FONT_FAMILIES = [
@@ -1380,13 +1460,13 @@
       /* Custom Modal Styles */
       .gm-modal-overlay{position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.7);backdrop-filter:blur(4px);z-index:2147483500;opacity:0;visibility:hidden;transition:all 0.2s ease}
       .gm-modal-overlay.show{opacity:1;visibility:visible}
-      .gm-modal{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%) scale(0.8);background:#1a1a1a;border:1px solid #444;border-radius:12px;box-shadow:0 20px 40px rgba(0,0,0,0.5);max-width:500px;width:90%;max-height:80vh;overflow:hidden;transition:transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1)}
+      .gm-modal{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%) scale(0.8);background:#1a1a1a;border:1px solid #444;border-radius:12px;box-shadow:0 20px 40px rgba(0,0,0,0.5);max-width:1000px;width:95%;max-height:90vh;overflow:hidden;transition:transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1)}
       .gm-modal-overlay.show .gm-modal{transform:translate(-50%,-50%) scale(1)}
       .gm-modal-header{padding:20px 24px 16px;border-bottom:1px solid #333;display:flex;align-items:center;justify-content:between}
       .gm-modal-title{color:#fff;font-size:18px;font-weight:600;margin:0;flex:1}
       .gm-modal-close{background:none;border:none;color:#888;font-size:24px;cursor:pointer;padding:0;width:32px;height:32px;border-radius:6px;display:flex;align-items:center;justify-content:center}
       .gm-modal-close:hover{background:#333;color:#fff}
-      .gm-modal-body{padding:20px 24px;color:#ddd;line-height:1.5;max-height:60vh;overflow-y:auto}
+      .gm-modal-body{padding:20px 24px;color:#ddd;line-height:1.5;max-height:75vh;overflow-y:auto}
       .gm-modal-footer{padding:16px 24px 20px;border-top:1px solid #333;display:flex;gap:12px;justify-content:flex-end}
       .gm-modal-btn{padding:10px 20px;border-radius:6px;border:none;font-size:14px;font-weight:500;cursor:pointer;transition:all 0.2s ease}
       .gm-modal-btn.primary{background:#667eea;color:#fff}
@@ -1395,7 +1475,7 @@
       .gm-modal-btn.secondary:hover{background:#555}
       .gm-modal-btn.danger{background:#dc3545;color:#fff}
       .gm-modal-btn.danger:hover{background:#c82333}
-      .gm-modal-content{white-space:pre-wrap;font-family:ui-monospace,SFMono-Regular,'SF Mono',Monaco,Inconsolata,'Roboto Mono',Consolas,'Droid Sans Mono','Liberation Mono',monospace;font-size:13px;background:#0f0f0f;padding:16px;border-radius:6px;border:1px solid #333;margin:8px 0;max-height:300px;overflow-y:auto}
+      .gm-modal-content{white-space:pre-wrap;font-family:ui-monospace,SFMono-Regular,'SF Mono',Monaco,Inconsolata,'Roboto Mono',Consolas,'Droid Sans Mono','Liberation Mono',monospace;font-size:13px;background:#0f0f0f;padding:16px;border-radius:6px;border:1px solid #333;margin:8px 0}
       .gm-modal-stats{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:16px 0}
       .gm-modal-stat{background:#222;padding:16px;border-radius:8px;text-align:center}
       .gm-modal-stat-value{font-size:24px;font-weight:700;color:#667eea;margin-bottom:4px}
@@ -1455,265 +1535,737 @@
     return b;
   }
 
-  const Counter = (() => {
+  const Stats = (() => {
     const handle = () => {};
     const init = pane => {
-      buildChatViewerPane(pane);
+      buildStatsPane(pane);
     };
     return { handle, init };
   })();
 
-  function buildChatViewerPane(pane) {
+  function buildStatsPane(pane) {
+    pane.classList.add('gm-stats-pane');
     pane.style.cssText = 'padding: 12px;';
+
+    // message analytics section
+    const analyticsSection = document.createElement('div');
+    analyticsSection.style.cssText = 'margin-bottom:16px;padding-bottom:16px;border-bottom:1px solid #333;';
+    const analyticsTitle = document.createElement('h4');
+    analyticsTitle.textContent = 'Message Analytics';
+    analyticsTitle.style.cssText = 'margin:0 0 8px 0;color:#fff;';
     
-    const selectSection = document.createElement('div');
-    selectSection.style.cssText = 'margin-bottom: 16px; padding-bottom: 16px; border-bottom: 1px solid #333;';
+    const analyticsGrid = document.createElement('div');
+    analyticsGrid.style.cssText = 'display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px;';
     
-    const selectTitle = document.createElement('h4');
-    selectTitle.textContent = 'Chat Viewer';
-    selectTitle.style.cssText = 'margin: 0 0 8px 0; color: #fff;';
+    const activityBtn = document.createElement('button');
+    activityBtn.textContent = 'User Activity';
+    activityBtn.className = 'gm-btn';
+    activityBtn.style.cssText = 'background:#9c27b0;font-size:12px;';
     
-    const chatSelect = document.createElement('select');
-    chatSelect.style.cssText = 'width: 100%; padding: 6px; border: 1px solid #444; border-radius: 4px; background: #2a2a2a; color: #fff; margin-bottom: 8px;';
-    const defaultOpt = document.createElement('option');
-    defaultOpt.value = '';
-    defaultOpt.textContent = 'Select Group or DM...';
-    chatSelect.appendChild(defaultOpt);
+    const timeAnalysisBtn = document.createElement('button');
+    timeAnalysisBtn.textContent = 'Time Analysis';
+    timeAnalysisBtn.className = 'gm-btn';
+    timeAnalysisBtn.style.cssText = 'background:#ff9800;font-size:12px;';
     
-    const loadBtn = document.createElement('button');
-    loadBtn.textContent = 'Load Cached Messages';
-    loadBtn.className = 'gm-btn';
-    loadBtn.style.cssText = 'width: 100%; background: #28a745; margin-bottom: 8px;';
+    const wordCloudBtn = document.createElement('button');
+    wordCloudBtn.textContent = 'Word Trends';
+    wordCloudBtn.className = 'gm-btn';
+    wordCloudBtn.style.cssText = 'background:#3f51b5;font-size:12px;';
     
-    const refetchBtn = document.createElement('button');
-    refetchBtn.textContent = 'Refetch All Messages';
-    refetchBtn.className = 'gm-btn';
-    refetchBtn.style.cssText = 'width: 100%; background: #17a2b8;';
+    const exportAnalyticsBtn = document.createElement('button');
+    exportAnalyticsBtn.textContent = 'Export Analytics';
+    exportAnalyticsBtn.className = 'gm-btn';
+    exportAnalyticsBtn.style.cssText = 'background:#00796b;font-size:12px;';
     
-    selectSection.append(selectTitle, chatSelect, loadBtn, refetchBtn);
-    pane.appendChild(selectSection);
+    analyticsGrid.append(activityBtn, timeAnalysisBtn, wordCloudBtn, exportAnalyticsBtn);
+    analyticsSection.append(analyticsTitle, analyticsGrid);
+    pane.appendChild(analyticsSection);
+
+    // Advanced Search section
+    const searchSection = document.createElement('div');
+    searchSection.style.cssText = 'margin-bottom: 16px; padding-bottom: 16px; border-bottom: 1px solid #333;';
     
-    // Results display area
-    const resultsSection = document.createElement('div');
-    resultsSection.style.cssText = 'max-height: 400px; overflow-y: auto;';
-    pane.appendChild(resultsSection);
+    const searchTitle = document.createElement('h4');
+    searchTitle.textContent = 'Advanced Search';
+    searchTitle.style.cssText = 'margin: 0 0 8px 0; color: #fff;';
     
-    // Populate chat dropdown (same as bulk fetch)
-    (async () => {
-      const headers = getAuthHeaders();
-      try {
-        const gResp = await fetch('https://api.groupme.com/v3/groups', { headers, credentials: 'omit' });
-        if (gResp.ok) {
-          const gd = await gResp.json();
-          (gd.response || []).forEach(g => {
-            const opt = document.createElement('option');
-            opt.value = `group:${g.id}`;
-            opt.textContent = g.name;
-            chatSelect.appendChild(opt);
-          });
-        }
-      } catch (e) { console.warn('Chat Viewer: failed to load groups', e); }
-      try {
-        // Use the chats API which returns a better structure for DM conversations
-        const dResp = await fetch('https://api.groupme.com/v3/chats', { headers, credentials: 'omit' });
-        if (dResp.ok) {
-          const dd = await dResp.json();
-          console.log('[GM+ Chat Viewer] DM conversations response:', dd);
-          (dd.response || []).forEach(dm => {
-            const opt = document.createElement('option');
-            opt.value = `dm:${dm.other_user.id}`;
-            opt.textContent = `${dm.other_user.name} (DM)`;
-            chatSelect.appendChild(opt);
-          });
-        } else {
-          console.warn('[GM+ Chat Viewer] Chats API failed, trying direct_messages fallback');
-          // Fallback to direct_messages endpoint if chats fails
-          const fallbackResp = await fetch('https://api.groupme.com/v3/direct_messages?acceptFiles=1&limit=100', { headers, credentials: 'omit' });
-          if (fallbackResp.ok) {
-            const fallbackData = await fallbackResp.json();
-            console.log('[GM+ Chat Viewer] Direct messages fallback response:', fallbackData);
-            // Extract unique users from direct messages
-            const users = new Map();
-            (fallbackData.response || []).forEach(msg => {
-              if (msg.user_id && msg.name && !users.has(msg.user_id)) {
-                users.set(msg.user_id, msg.name);
-              }
-            });
-            users.forEach((name, userId) => {
-              const opt = document.createElement('option');
-              opt.value = `dm:${userId}`;
-              opt.textContent = `${name} (DM)`;
-              chatSelect.appendChild(opt);
-            });
-          }
-        }
-      } catch (e) { 
-        console.warn('Chat Viewer: failed to load DMs', e); 
-        console.log('[GM+ Chat Viewer] Error details:', e);
+    const searchInput = document.createElement('input');
+    searchInput.type = 'text';
+    searchInput.placeholder = 'Search messages...';
+    searchInput.className = 'gm-search-input';
+    searchInput.style.marginBottom = '8px';
+    
+    // Advanced filters container
+    const filtersContainer = document.createElement('div');
+    filtersContainer.style.cssText = 'background:#1a1a1a;border:1px solid #333;border-radius:4px;padding:8px;margin-bottom:8px;';
+    
+    const filtersTitle = document.createElement('div');
+    filtersTitle.textContent = 'Filters';
+    filtersTitle.style.cssText = 'font-size:12px;color:#888;margin-bottom:8px;font-weight:600;';
+    
+    // Date range inputs
+    const dateRow = document.createElement('div');
+    dateRow.style.cssText = 'display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px;';
+    
+    const dateFromLabel = document.createElement('div');
+    dateFromLabel.textContent = 'From Date:';
+    dateFromLabel.style.cssText = 'font-size:11px;color:#888;margin-bottom:2px;';
+    
+    const dateFromInput = document.createElement('input');
+    dateFromInput.type = 'date';
+    dateFromInput.style.cssText = 'background:#2a2a2a;color:#fff;border:1px solid #444;border-radius:4px;padding:4px;font-size:12px;';
+    dateFromInput.title = 'Start date for search range';
+    
+    const dateToLabel = document.createElement('div');
+    dateToLabel.textContent = 'To Date:';
+    dateToLabel.style.cssText = 'font-size:11px;color:#888;margin-bottom:2px;';
+    
+    const dateToInput = document.createElement('input');
+    dateToInput.type = 'date';
+    dateToInput.style.cssText = 'background:#2a2a2a;color:#fff;border:1px solid #444;border-radius:4px;padding:4px;font-size:12px;';
+    dateToInput.title = 'End date for search range';
+    
+    const dateFromContainer = document.createElement('div');
+    dateFromContainer.append(dateFromLabel, dateFromInput);
+    
+    const dateToContainer = document.createElement('div');
+    dateToContainer.append(dateToLabel, dateToInput);
+    
+    dateRow.append(dateFromContainer, dateToContainer);
+    
+    // User filter
+    const userInput = document.createElement('input');
+    userInput.type = 'text';
+    userInput.placeholder = 'Filter by user name...';
+    userInput.style.cssText = 'width:100%;background:#2a2a2a;color:#fff;border:1px solid #444;border-radius:4px;padding:4px;font-size:12px;margin-bottom:8px;';
+    
+    // Checkbox options
+    const searchOptions = document.createElement('div');
+    searchOptions.style.cssText = 'display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 8px; font-size: 12px;';
+    
+    const caseSensitiveLabel = document.createElement('label');
+    caseSensitiveLabel.style.cssText = 'display: flex; align-items: center; gap: 4px; color: #ddd; cursor: pointer;';
+    const caseSensitiveCheck = document.createElement('input'); 
+    caseSensitiveCheck.type = 'checkbox'; 
+    caseSensitiveCheck.id = 'gm-case-sensitive';
+    caseSensitiveLabel.append(caseSensitiveCheck, document.createTextNode('Case sensitive'));
+    
+    const fullWordLabel = document.createElement('label');
+    fullWordLabel.style.cssText = 'display: flex; align-items: center; gap: 4px; color: #ddd; cursor: pointer;';
+    const fullWordCheck = document.createElement('input'); 
+    fullWordCheck.type = 'checkbox'; 
+    fullWordCheck.id = 'gm-full-word';
+    fullWordLabel.append(fullWordCheck, document.createTextNode('Full word'));
+    
+    const attachmentsLabel = document.createElement('label');
+    attachmentsLabel.style.cssText = 'display: flex; align-items: center; gap: 4px; color: #ddd; cursor: pointer;';
+    const attachmentsCheck = document.createElement('input'); 
+    attachmentsCheck.type = 'checkbox'; 
+    attachmentsCheck.id = 'gm-has-attachments';
+    attachmentsLabel.append(attachmentsCheck, document.createTextNode('Has attachments'));
+    
+    const systemMsgLabel = document.createElement('label');
+    systemMsgLabel.style.cssText = 'display: flex; align-items: center; gap: 4px; color: #ddd; cursor: pointer;';
+    const systemMsgCheck = document.createElement('input'); 
+    systemMsgCheck.type = 'checkbox'; 
+    systemMsgCheck.id = 'gm-exclude-system';
+    systemMsgCheck.checked = true;
+    systemMsgLabel.append(systemMsgCheck, document.createTextNode('Exclude system'));
+    
+    searchOptions.append(caseSensitiveLabel, fullWordLabel, attachmentsLabel, systemMsgLabel);
+    
+    filtersContainer.append(filtersTitle, dateRow, userInput, searchOptions);
+    
+    const searchButtonRow = document.createElement('div');
+    searchButtonRow.style.cssText = 'display:flex;gap:8px;';
+    
+    const searchBtn = document.createElement('button'); 
+    searchBtn.textContent = 'Search'; 
+    searchBtn.className = 'gm-btn';
+    searchBtn.style.cssText = 'background: #28a745; flex: 1;';
+    
+    const exportResultsBtn = document.createElement('button'); 
+    exportResultsBtn.textContent = 'Export Results'; 
+    exportResultsBtn.className = 'gm-btn';
+    exportResultsBtn.style.cssText = 'background: #17a2b8; flex: 1;';
+    exportResultsBtn.disabled = true;
+    
+    searchButtonRow.append(searchBtn, exportResultsBtn);
+    
+    const searchResults = document.createElement('div');
+    searchResults.style.cssText = 'max-height: 300px; overflow-y: auto; margin-top: 8px; display: none;';
+    
+    searchSection.append(searchTitle, searchInput, filtersContainer, searchButtonRow, searchResults);
+    pane.appendChild(searchSection);
+
+    let currentSearchResults = [];
+
+    const performSearch = async () => {
+      Modal.close();
+      const q = searchInput.value.trim(); 
+      if (!q && !dateFromInput.value && !dateToInput.value && !userInput.value.trim()) { 
+        searchResults.style.display = 'none'; 
+        exportResultsBtn.disabled = true;
+        return; 
       }
-    })();
-    
-    // Load cached messages for selected chat
-    loadBtn.onclick = async () => {
-      const sel = chatSelect.value;
-      if (!sel) return Modal.alert('Select Chat', 'Please select a group or direct message.', 'error');
-      if (!Cache) return Modal.alert('Cache Unavailable', 'Cache not available', 'error');
+      if (!Cache) { 
+        Modal.alert('Cache Unavailable','Cache not available','error'); 
+        return; 
+      }
       
-      loadBtn.disabled = true;
-      loadBtn.textContent = 'Loading...';
+      searchBtn.disabled = true; 
+      searchBtn.textContent = 'Searching...';
       
       try {
-        const [type, id] = sel.split(':');
-        const isGroup = type === 'group';
-        let messages = [];
+        const options = {
+          limit: 500,
+          caseSensitive: caseSensitiveCheck.checked,
+          fullWord: fullWordCheck.checked
+        };
         
-        if (isGroup) {
-          messages = await Cache.search('', { groupId: id, limit: 1000 });
-        } else {
-          const allMessages = await Cache.all();
-          messages = allMessages.filter(msg => {
-            // Check if this message is from a DM with the specified user
-            return (msg.conversation_id && (
-              msg.user_id === id || 
-              msg.sender_id === id ||
-              (msg.recipients && msg.recipients.some(r => r.user_id === id))
-            )) || 
-            // Also check for group_id that might actually be a conversation_id for DMs
-            (msg.group_id && msg.group_id.toString() === id);
-          }).slice(0, 1000);
+        // Add date filters
+        if (dateFromInput.value) {
+          const fromDate = new Date(dateFromInput.value + 'T00:00:00'); // Force local timezone at start of day
+          options.dateFrom = Math.floor(fromDate.getTime() / 1000);
+          console.log(`[GM+ Search] From date: ${dateFromInput.value} -> ${fromDate.toLocaleString()} -> ${options.dateFrom}`);
+        }
+        if (dateToInput.value) {
+          const toDate = new Date(dateToInput.value + 'T23:59:59'); // Force local timezone at end of day
+          options.dateTo = Math.floor(toDate.getTime() / 1000);
+          console.log(`[GM+ Search] To date: ${dateToInput.value} -> ${toDate.toLocaleString()} -> ${options.dateTo}`);
         }
         
-        if (!messages.length) {
-          resultsSection.innerHTML = '<div style="text-align: center; color: #888; padding: 20px;">No cached messages found for this chat.</div>';
+        // If we have date filters, increase the limit since we're filtering a lot
+        if (options.dateFrom || options.dateTo) {
+          options.limit = 5000; // Much higher limit for date-based searches
+        }
+        
+        if (attachmentsCheck.checked) {
+          options.hasAttachments = true;
+        }
+        
+        let results = await Cache.search(q, options);
+        console.log(`[GM+ Search] Search completed. Query: "${q}", Options:`, options, `Results: ${results.length}`);
+        
+        // Log first few results to see what we got
+        if (results.length > 0) {
+          console.log(`[GM+ Search] First few results:`, results.slice(0, 5).map(msg => ({
+            name: msg.name,
+            text: msg.text ? msg.text.substring(0, 50) + '...' : '[no text]',
+            created_at: msg.created_at,
+            date: new Date(msg.created_at * 1000).toLocaleString()
+          })));
+        }
+        
+        if (userInput.value.trim()) {
+          const userFilter = userInput.value.trim().toLowerCase();
+          results = results.filter(msg => 
+            (msg.name || '').toLowerCase().includes(userFilter)
+          );
+        }
+
+        if (dateFromInput.value || dateToInput.value) {
+          results = results.filter(msg => {
+            const msgDate = new Date(msg.created_at * 1000);
+            let withinRange = true;
+            
+            if (dateFromInput.value) {
+              const fromDate = new Date(dateFromInput.value + 'T00:00:00');
+              withinRange = withinRange && msgDate >= fromDate;
+            }
+            
+            if (dateToInput.value) {
+              const toDate = new Date(dateToInput.value + 'T23:59:59');
+              withinRange = withinRange && msgDate <= toDate;
+            }
+            
+            return withinRange;
+          });
+          console.log(`[GM+ Search] After additional date filtering: ${results.length} results`);
+        }
+
+        if (systemMsgCheck.checked) {
+          results = results.filter(msg => !msg.system && !msg.event);
+        }
+        
+        currentSearchResults = results;
+        
+        if (!results.length) {
+          searchResults.innerHTML = '<div style="color:#888;text-align:center;padding:16px;">No messages found matching your criteria</div>';
+          exportResultsBtn.disabled = true;
         } else {
-          const chatName = chatSelect.options[chatSelect.selectedIndex].textContent;
-          resultsSection.innerHTML = `
-            <div style="margin-bottom: 12px; padding: 8px; background: #333; border-radius: 4px;">
-              <strong style="color: #fff;">${chatName}</strong><br>
-              <span style="color: #888; font-size: 12px;">${messages.length} cached messages • ${isGroup ? 'Group' : 'Direct Message'}</span>
-            </div>
-            <div style="max-height: 300px; overflow-y: auto;">
-              ${messages.slice(0, 50).map(msg => `
-                <div style="background: #222; margin: 4px 0; padding: 8px; border-radius: 4px; border-left: 3px solid #667eea;">
-                  <div style="font-size: 12px; color: #888; margin-bottom: 4px;">
-                    ${msg.name || 'Unknown'} • ${new Date(msg.created_at * 1000).toLocaleString()}
-                  </div>
-                  <div style="font-size: 14px; color: #ddd;">
-                    ${(msg.text || '').substring(0, 150)}${msg.text && msg.text.length > 150 ? '...' : ''}
-                  </div>
-                  ${msg.attachments && msg.attachments.length > 0 ? `
-                    <div style="font-size: 11px; color: #888; margin-top: 4px;">
-                      📎 ${msg.attachments.length} attachment(s)
-                    </div>
-                  ` : ''}
+          const resultsHtml = results.slice(0, 100).map((msg, index) => {
+            const dateStr = new Date(msg.created_at * 1000).toLocaleString();
+            const attachmentInfo = msg.attachments?.length ? 
+              `<div style="font-size:11px;color:#888;margin-top:4px;">📎 ${msg.attachments.length} attachment(s): ${msg.attachments.map(a => a.type || 'unknown').join(', ')}</div>` : '';
+            
+            const textContent = msg.text || (msg.system ? '[System Message]' : '[No text content]');
+            const truncatedText = textContent.length > 150 ? textContent.substring(0, 150) + '...' : textContent;
+            
+            return `
+              <div style="background:#222;margin:4px 0;padding:8px;border-radius:4px;border-left:3px solid #667eea;" data-msg-id="${msg.id}">
+                <div style="font-size:12px;color:#888;margin-bottom:4px;display:flex;justify-content:space-between;">
+                  <span>${msg.name || 'Unknown'} • ${dateStr}</span>
+                  <span style="color:#667eea;">#${index + 1}</span>
                 </div>
-              `).join('')}
-              ${messages.length > 50 ? `
-                <div style="text-align: center; color: #888; padding: 8px; font-size: 12px;">
-                  Showing first 50 of ${messages.length} messages
-                </div>
-              ` : ''}
+                <div style="font-size:14px;color:#ddd;margin-bottom:4px;">${truncatedText}</div>
+                ${attachmentInfo}
+                ${msg.group_id ? `<div style="font-size:10px;color:#666;">Group: ${msg.group_id}</div>` : ''}
+                ${msg.likes_count ? `<div style="font-size:10px;color:#666;">❤️ ${msg.likes_count} likes</div>` : ''}
+              </div>
+            `;
+          }).join('');
+          
+          const summary = `
+            <div style="background:#333;padding:8px;margin-bottom:8px;border-radius:4px;">
+              <strong style="color:#fff;">Search Results: ${results.length} messages found</strong>
+              ${results.length > 100 ? '<div style="color:#888;font-size:12px;">Showing first 100 results</div>' : ''}
             </div>
           `;
+          
+          searchResults.innerHTML = summary + resultsHtml;
+          exportResultsBtn.disabled = false;
         }
+  searchResults.style.display = 'block';
+  // re-open the stats pane to recalculate position
+  open(2);
+  pane.scrollTop = pane.scrollHeight;
       } catch (error) {
-        console.error('[GM+ Chat Viewer] Load error:', error);
-        resultsSection.innerHTML = '<div style="text-align: center; color: #dc3545; padding: 20px;">Error loading messages</div>';
+        console.error('[GM+ Search] Error:', error);
+        searchResults.innerHTML = '<div style="color:#dc3545;text-align:center;padding:16px;">Search failed: ' + error.message + '</div>';
+  searchResults.style.display = 'block';
+  open(2);
+  pane.scrollTop = pane.scrollHeight;
+  exportResultsBtn.disabled = true;
       } finally {
-        loadBtn.disabled = false;
-        loadBtn.textContent = 'Load Cached Messages';
+        searchBtn.disabled = false; 
+        searchBtn.textContent = 'Search';
+      }
+    };
+
+    exportResultsBtn.onclick = async () => {
+      if (!currentSearchResults.length) {
+        Modal.alert('No Results', 'No search results to export.', 'error');
+        return;
+      }
+      
+      try {
+        exportResultsBtn.disabled = true;
+        exportResultsBtn.textContent = 'Exporting...';
+        
+        const csvHeaders = ['Index','ID','Name','Message','Timestamp','Group ID','User ID','Likes','Has Attachments','Message Type'];
+        const csvRows = currentSearchResults.map((msg, index) => [
+          index + 1,
+          `"${(msg.id || '').replace(/"/g, '""')}"`,
+          `"${(msg.name || '').replace(/"/g, '""')}"`,
+          `"${(msg.text || '').replace(/"/g, '""')}"`,
+          msg.created_at ? new Date(msg.created_at * 1000).toISOString() : '',
+          `"${(msg.group_id || '').replace(/"/g, '""')}"`,
+          `"${(msg.user_id || '').replace(/"/g, '""')}"`,
+          msg.likes_count || 0,
+          msg.attachments?.length > 0 ? 'Yes' : 'No',
+          msg.system ? 'System' : (msg.event ? 'Event' : 'User')
+        ].join(','));
+        
+        const csv = [csvHeaders.join(','), ...csvRows].join('\r\n');
+        const blob = new Blob([csv], { type: 'text/csv' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = `groupme_search_results_${Date.now()}.csv`;
+        a.click();
+        
+        Modal.alert('Export Complete', `Successfully exported ${currentSearchResults.length} search results to CSV`, 'info');
+      } catch (error) {
+        console.error('[GM+ Search Export] Error:', error);
+        Modal.alert('Export Error', `Error exporting search results: ${error.message}`, 'error');
+      } finally {
+        exportResultsBtn.disabled = false;
+        exportResultsBtn.textContent = 'Export Results';
       }
     };
     
-    // Refetch all messages for selected chat
-    refetchBtn.onclick = async () => {
-      const sel = chatSelect.value;
-      if (!sel) return Modal.alert('Select Chat', 'Please select a group or direct message.', 'error');
+    searchBtn.onclick = performSearch; 
+    searchInput.addEventListener('keypress', e => { 
+      if (e.key === 'Enter') performSearch(); 
+    });
+
+    activityBtn.onclick = async () => {
+      if (!Cache) {
+        Modal.alert('Cache Unavailable', 'Cache not available for analytics', 'error');
+        return;
+      }
       
-      refetchBtn.disabled = true;
-      const [type, id] = sel.split(':');
-      let beforeId = '';
-      let total = 0;
-      const headers = getAuthHeaders();
-      let retryCount = 0;
-      const maxRetries = 5;
+      activityBtn.disabled = true;
+      activityBtn.textContent = 'Analyzing...';
       
       try {
-        refetchBtn.textContent = 'Fetching...';
-        while (true) {
-          let url = '';
-          if (type === 'group') {
-            url = `https://api.groupme.com/v3/groups/${id}/messages?acceptFiles=1&limit=100${beforeId?`&before_id=${beforeId}`:''}`;
-          } else {
-            url = `https://api.groupme.com/v3/direct_messages?acceptFiles=1&limit=100&other_user_id=${id}${beforeId?`&before_id=${beforeId}`:''}`;
+        const messages = await Cache.all();
+        if (!messages.length) {
+          Modal.alert('No Data', 'No messages available for analysis', 'info');
+          return;
+        }
+        
+        // User activity analysis
+        const userStats = {};
+        const hourlyActivity = new Array(24).fill(0);
+        const dailyActivity = {};
+        
+        messages.forEach(msg => {
+          if (msg.system || !msg.name) return;
+          
+          // User stats
+          if (!userStats[msg.name]) {
+            userStats[msg.name] = { 
+              messages: 0, 
+              characters: 0, 
+              attachments: 0, 
+              likes_received: 0,
+              first_message: msg.created_at,
+              last_message: msg.created_at
+            };
           }
           
-          try {
-            const resp = await fetch(url, { headers, credentials: 'omit' });
+          const stats = userStats[msg.name];
+          stats.messages++;
+          stats.characters += (msg.text || '').length;
+          stats.attachments += (msg.attachments || []).length;
+          stats.likes_received += (msg.likes_count || 0);
+          stats.first_message = Math.min(stats.first_message, msg.created_at);
+          stats.last_message = Math.max(stats.last_message, msg.created_at);
+          
+          // Time analysis
+          const date = new Date(msg.created_at * 1000);
+          const hour = date.getHours();
+          const day = date.toDateString();
+          
+          hourlyActivity[hour]++;
+          dailyActivity[day] = (dailyActivity[day] || 0) + 1;
+        });
+        
+        // Sort users by message count
+        const topUsers = Object.entries(userStats)
+          .sort(([,a], [,b]) => b.messages - a.messages)
+          .slice(0, 10);
+        
+        // Find peak activity times
+        const peakHour = hourlyActivity.indexOf(Math.max(...hourlyActivity));
+        const peakDay = Object.entries(dailyActivity)
+          .sort(([,a], [,b]) => b - a)[0];
+        
+        const analysisHtml = `
+          <div style="max-height:400px;overflow-y:auto;">
+            <h3 style="color:#667eea;margin:0 0 16px 0;">User Activity Analysis</h3>
             
-            if (resp.status === 429) {
-              // wait and retry when rate limited
-              if (retryCount < maxRetries) {
-                retryCount++;
-                const waitTime = Math.pow(1.5, retryCount) * 1000; // exponential backoff
-                refetchBtn.textContent = `Rate limited, waiting ${waitTime/1000}s...`;
-                await new Promise(resolve => setTimeout(resolve, waitTime));
-                continue;
-              } else {
-                throw new Error('Rate limit exceeded after retries');
-              }
-            }
+            <div style="background:#1a1a1a;border:1px solid #333;border-radius:4px;padding:12px;margin-bottom:16px;">
+              <h4 style="color:#fff;margin:0 0 8px 0;">Top Contributors</h4>
+              ${topUsers.map(([name, stats], index) => `
+                <div style="margin-bottom:8px;padding:8px;background:#222;border-radius:4px;">
+                  <div style="font-weight:600;color:#fff;">#${index + 1} ${name}</div>
+                  <div style="font-size:12px;color:#888;margin-top:4px;">
+                    📝 ${stats.messages.toLocaleString()} messages • 
+                    📊 ${Math.round(stats.characters / stats.messages)} avg chars • 
+                    📎 ${stats.attachments} attachments • 
+                    ❤️ ${stats.likes_received} likes
+                  </div>
+                  <div style="font-size:11px;color:#666;margin-top:2px;">
+                    Active: ${new Date(stats.first_message * 1000).toLocaleDateString()} to ${new Date(stats.last_message * 1000).toLocaleDateString()}
+                  </div>
+                </div>
+              `).join('')}
+            </div>
             
-            if (!resp.ok) {
-              throw new Error(`HTTP ${resp.status}: ${resp.statusText}`);
-            }
-            
-            const jd = await resp.json();
-            console.log(`[GM+ Chat Viewer] API response for ${type}:`, jd);
-            
-            // handle different response structures for groups and DMs
-            let msgs = [];
-            if (type === 'group') {
-              msgs = (jd.response && jd.response.messages) || [];
-            } else {
-              msgs = (jd.response && jd.response.direct_messages) || [];
-              console.log(`[GM+ Chat Viewer] Found ${msgs.length} direct messages in response`);
-            }
-            
-            console.log(`[GM+ Chat Viewer] Extracted ${msgs.length} messages from response`);
-            if (!msgs.length) break;
-            
-            const batch = Object.fromEntries(msgs.map(m => [m.id, m]));
-            await Cache.store(batch);
-            total += msgs.length;
-            refetchBtn.textContent = `Fetched ${total} messages...`;
-            beforeId = msgs[msgs.length - 1].id;
-            retryCount = 0; // Reset retry count on success
-            
-            // Small delay to avoid overwhelming the API
-            await new Promise(resolve => setTimeout(resolve, 100));
-            
-          } catch (fetchError) {
-            if (retryCount < maxRetries && (fetchError.message.includes('fetch') || fetchError.message.includes('network'))) {
-              retryCount++;
-              const waitTime = Math.pow(2, retryCount) * 1000;
-              refetchBtn.textContent = `Network error, retrying in ${waitTime/1000}s...`;
-              await new Promise(resolve => setTimeout(resolve, waitTime));
-              continue;
-            } else {
-              throw fetchError;
-            }
-          }
-        }
-        Modal.alert('Refetch Complete', `Fetched and cached ${total} messages.`, 'info');
-        // Auto-reload the display
-        if (total > 0) loadBtn.click();
-      } catch (e) {
-        console.error('Chat Viewer refetch error', e);
-        Modal.alert('Error', `Refetch failed: ${e.message}`, 'error');
+            <div style="background:#1a1a1a;border:1px solid #333;border-radius:4px;padding:12px;">
+              <h4 style="color:#fff;margin:0 0 8px 0;">Activity Patterns</h4>
+              <div style="margin-bottom:8px;">
+                <strong style="color:#667eea;">Peak Hour:</strong> ${peakHour}:00 (${hourlyActivity[peakHour]} messages)
+              </div>
+              <div style="margin-bottom:8px;">
+                <strong style="color:#667eea;">Most Active Day:</strong> ${peakDay ? peakDay[0] : 'N/A'} (${peakDay ? peakDay[1] : 0} messages)
+              </div>
+              <div style="margin-bottom:8px;">
+                <strong style="color:#667eea;">Total Messages:</strong> ${messages.length.toLocaleString()}
+              </div>
+              <div>
+                <strong style="color:#667eea;">Average per Day:</strong> ${Math.round(messages.length / Object.keys(dailyActivity).length)} messages
+              </div>
+            </div>
+          </div>
+        `;
+        
+        Modal.analytics('User Activity Analysis', analysisHtml);
+        
+      } catch (error) {
+        console.error('[GM+ Analytics] User activity error:', error);
+        Modal.alert('Analysis Error', `Failed to analyze user activity: ${error.message}`, 'error');
       } finally {
-        refetchBtn.disabled = false;
-        refetchBtn.textContent = 'Refetch All Messages';
+        activityBtn.disabled = false;
+        activityBtn.textContent = 'User Activity';
+      }
+    };
+
+    timeAnalysisBtn.onclick = async () => {
+      if (!Cache) {
+        Modal.alert('Cache Unavailable', 'Cache not available for analytics', 'error');
+        return;
+      }
+      
+      timeAnalysisBtn.disabled = true;
+      timeAnalysisBtn.textContent = 'Analyzing...';
+      
+      try {
+        const messages = await Cache.all();
+        if (!messages.length) {
+          Modal.alert('No Data', 'No messages available for analysis', 'info');
+          return;
+        }
+        
+        const hourlyData = new Array(24).fill(0);
+        const weeklyData = new Array(7).fill(0);
+        const monthlyData = {};
+        
+        messages.forEach(msg => {
+          if (msg.system) return;
+          
+          const date = new Date(msg.created_at * 1000);
+          hourlyData[date.getHours()]++;
+          weeklyData[date.getDay()]++;
+          
+          const monthKey = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+          monthlyData[monthKey] = (monthlyData[monthKey] || 0) + 1;
+        });
+        
+        const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+        const maxHourly = Math.max(...hourlyData);
+        const maxWeekly = Math.max(...weeklyData);
+        
+        const timeAnalysisHtml = `
+          <div style="max-height:400px;overflow-y:auto;">
+            <h3 style="color:#667eea;margin:0 0 16px 0;">Time Analysis</h3>
+            
+            <div style="background:#1a1a1a;border:1px solid #333;border-radius:4px;padding:12px;margin-bottom:16px;">
+              <h4 style="color:#fff;margin:0 0 8px 0;">Hourly Activity</h4>
+              ${hourlyData.map((count, hour) => {
+                const percentage = maxHourly > 0 ? (count / maxHourly) * 100 : 0;
+                return `
+                  <div style="display:flex;align-items:center;margin-bottom:4px;">
+                    <div style="width:40px;color:#888;font-size:12px;">${hour}:00</div>
+                    <div style="flex:1;background:#333;height:16px;border-radius:8px;overflow:hidden;margin:0 8px;">
+                      <div style="background:#667eea;height:100%;width:${percentage}%;transition:width 0.3s;"></div>
+                    </div>
+                    <div style="width:40px;color:#ddd;font-size:12px;text-align:right;">${count}</div>
+                  </div>
+                `;
+              }).join('')}
+            </div>
+            
+            <div style="background:#1a1a1a;border:1px solid #333;border-radius:4px;padding:12px;">
+              <h4 style="color:#fff;margin:0 0 8px 0;">Weekly Activity</h4>
+              ${weeklyData.map((count, day) => {
+                const percentage = maxWeekly > 0 ? (count / maxWeekly) * 100 : 0;
+                return `
+                  <div style="display:flex;align-items:center;margin-bottom:4px;">
+                    <div style="width:80px;color:#888;font-size:12px;">${dayNames[day]}</div>
+                    <div style="flex:1;background:#333;height:16px;border-radius:8px;overflow:hidden;margin:0 8px;">
+                      <div style="background:#28a745;height:100%;width:${percentage}%;transition:width 0.3s;"></div>
+                    </div>
+                    <div style="width:40px;color:#ddd;font-size:12px;text-align:right;">${count}</div>
+                  </div>
+                `;
+              }).join('')}
+            </div>
+          </div>
+        `;
+        
+        Modal.analytics('Time Analysis', timeAnalysisHtml);
+        
+      } catch (error) {
+        console.error('[GM+ Analytics] Time analysis error:', error);
+        Modal.alert('Analysis Error', `Failed to analyze time patterns: ${error.message}`, 'error');
+      } finally {
+        timeAnalysisBtn.disabled = false;
+        timeAnalysisBtn.textContent = 'Time Analysis';
+      }
+    };
+
+    wordCloudBtn.onclick = async () => {
+      if (!Cache) {
+        Modal.alert('Cache Unavailable', 'Cache not available for analytics', 'error');
+        return;
+      }
+      
+      wordCloudBtn.disabled = true;
+      wordCloudBtn.textContent = 'Analyzing...';
+      
+      try {
+        const messages = await Cache.all();
+        if (!messages.length) {
+          Modal.alert('No Data', 'No messages available for analysis', 'info');
+          return;
+        }
+        
+        const wordCounts = {};
+        const emojis = {};
+        const commonWords = new Set(['the', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by', 'from', 'up', 'about', 'into', 'over', 'after', 'a', 'an', 'as', 'i', 'you', 'he', 'she', 'we', 'they', 'me', 'him', 'her', 'us', 'them', 'my', 'your', 'his', 'her', 'our', 'their', 'mine', 'yours', 'hers', 'ours', 'theirs', 'this', 'that', 'these', 'those', 'am', 'is', 'are', 'was', 'were', 'be', 'been', 'being', 'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'should', 'could', 'can', 'cant', 'cannot', 'may', 'might', 'must', 'shall']);
+        
+        messages.forEach(msg => {
+          if (msg.system || !msg.text) return;
+          
+          // Extract words
+          const words = msg.text.toLowerCase()
+            .replace(/[^\w\s]/g, ' ')
+            .split(/\s+/)
+            .filter(word => word.length > 2 && !commonWords.has(word));
+          
+          words.forEach(word => {
+            wordCounts[word] = (wordCounts[word] || 0) + 1;
+          });
+          
+          // Extract emojis
+          const emojiRegex = /[\u{1F600}-\u{1F64F}]|[\u{1F300}-\u{1F5FF}]|[\u{1F680}-\u{1F6FF}]|[\u{1F1E0}-\u{1F1FF}]|[\u{2600}-\u{26FF}]|[\u{2700}-\u{27BF}]/gu;
+          const foundEmojis = msg.text.match(emojiRegex) || [];
+          foundEmojis.forEach(emoji => {
+            emojis[emoji] = (emojis[emoji] || 0) + 1;
+          });
+        });
+        
+        const topWords = Object.entries(wordCounts)
+          .sort(([,a], [,b]) => b - a)
+          .slice(0, 20);
+        
+        const topEmojis = Object.entries(emojis)
+          .sort(([,a], [,b]) => b - a)
+          .slice(0, 10);
+        
+        const maxWordCount = topWords[0] ? topWords[0][1] : 1;
+        const maxEmojiCount = topEmojis[0] ? topEmojis[0][1] : 1;
+        
+        const wordTrendsHtml = `
+          <div style="max-height:400px;overflow-y:auto;">
+            <h3 style="color:#667eea;margin:0 0 16px 0;">Word Trends & Usage</h3>
+            
+            <div style="background:#1a1a1a;border:1px solid #333;border-radius:4px;padding:12px;margin-bottom:16px;">
+              <h4 style="color:#fff;margin:0 0 8px 0;">Most Used Words</h4>
+              ${topWords.map(([word, count]) => {
+                const percentage = (count / maxWordCount) * 100;
+                return `
+                  <div style="display:flex;align-items:center;margin-bottom:4px;">
+                    <div style="width:100px;color:#888;font-size:12px;text-transform:capitalize;">${word}</div>
+                    <div style="flex:1;background:#333;height:16px;border-radius:8px;overflow:hidden;margin:0 8px;">
+                      <div style="background:#3f51b5;height:100%;width:${percentage}%;transition:width 0.3s;"></div>
+                    </div>
+                    <div style="width:40px;color:#ddd;font-size:12px;text-align:right;">${count}</div>
+                  </div>
+                `;
+              }).join('')}
+            </div>
+            
+            ${topEmojis.length > 0 ? `
+              <div style="background:#1a1a1a;border:1px solid #333;border-radius:4px;padding:12px;">
+                <h4 style="color:#fff;margin:0 0 8px 0;">Popular Emojis</h4>
+                ${topEmojis.map(([emoji, count]) => {
+                  const percentage = (count / maxEmojiCount) * 100;
+                  return `
+                    <div style="display:flex;align-items:center;margin-bottom:4px;">
+                      <div style="width:40px;font-size:16px;text-align:center;">${emoji}</div>
+                      <div style="flex:1;background:#333;height:16px;border-radius:8px;overflow:hidden;margin:0 8px;">
+                        <div style="background:#ff9800;height:100%;width:${percentage}%;transition:width 0.3s;"></div>
+                      </div>
+                      <div style="width:40px;color:#ddd;font-size:12px;text-align:right;">${count}</div>
+                    </div>
+                  `;
+                }).join('')}
+              </div>
+            ` : ''}
+          </div>
+        `;
+        
+        Modal.analytics('Word Trends Analysis', wordTrendsHtml);
+        
+      } catch (error) {
+        console.error('[GM+ Analytics] Word trends error:', error);
+        Modal.alert('Analysis Error', `Failed to analyze word trends: ${error.message}`, 'error');
+      } finally {
+        wordCloudBtn.disabled = false;
+        wordCloudBtn.textContent = 'Word Trends';
+      }
+    };
+
+    exportAnalyticsBtn.onclick = async () => {
+      if (!Cache) {
+        Modal.alert('Cache Unavailable', 'Cache not available for analytics', 'error');
+        return;
+      }
+      
+      exportAnalyticsBtn.disabled = true;
+      exportAnalyticsBtn.textContent = 'Generating...';
+      
+      try {
+        const messages = await Cache.all();
+        if (!messages.length) {
+          Modal.alert('No Data', 'No messages available for analytics export', 'info');
+          return;
+        }
+        
+        // Generate comprehensive analytics
+        const analytics = {
+          summary: {
+            total_messages: messages.length,
+            date_range: {
+              first_message: new Date(Math.min(...messages.map(m => m.created_at)) * 1000).toISOString(),
+              last_message: new Date(Math.max(...messages.map(m => m.created_at)) * 1000).toISOString()
+            },
+            unique_users: new Set(messages.filter(m => !m.system).map(m => m.name)).size,
+            total_attachments: messages.reduce((sum, m) => sum + (m.attachments?.length || 0), 0),
+            total_likes: messages.reduce((sum, m) => sum + (m.likes_count || 0), 0)
+          },
+          user_stats: {},
+          time_patterns: {
+            hourly: new Array(24).fill(0),
+            daily: new Array(7).fill(0),
+            monthly: {}
+          }
+        };
+        
+        // Calculate user statistics and time patterns
+        messages.forEach(msg => {
+          if (!msg.system && msg.name) {
+            if (!analytics.user_stats[msg.name]) {
+              analytics.user_stats[msg.name] = {
+                messages: 0,
+                characters: 0,
+                attachments: 0,
+                likes_received: 0
+              };
+            }
+            analytics.user_stats[msg.name].messages++;
+            analytics.user_stats[msg.name].characters += (msg.text || '').length;
+            analytics.user_stats[msg.name].attachments += (msg.attachments || []).length;
+            analytics.user_stats[msg.name].likes_received += (msg.likes_count || 0);
+          }
+          
+          const date = new Date(msg.created_at * 1000);
+          analytics.time_patterns.hourly[date.getHours()]++;
+          analytics.time_patterns.daily[date.getDay()]++;
+          
+          const monthKey = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+          analytics.time_patterns.monthly[monthKey] = (analytics.time_patterns.monthly[monthKey] || 0) + 1;
+        });
+        
+        const analyticsJson = JSON.stringify(analytics, null, 2);
+        const blob = new Blob([analyticsJson], { type: 'application/json' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = `groupme_analytics_${Date.now()}.json`;
+        a.click();
+        
+        Modal.alert('Analytics Export Complete', `Successfully exported comprehensive analytics for ${messages.length.toLocaleString()} messages`, 'info');
+        
+      } catch (error) {
+        console.error('[GM+ Analytics] Export error:', error);
+        Modal.alert('Export Error', `Failed to export analytics: ${error.message}`, 'error');
+      } finally {
+        exportAnalyticsBtn.disabled = false;
+        exportAnalyticsBtn.textContent = 'Export Analytics';
       }
     };
   }
@@ -1944,27 +2496,22 @@
         console.log(`[GM+ Font] Loading font: "${fam}" weight ${weight} from URL: ${fontUrl}`);
         
         importCSS(fontUrl);        
-        setTimeout(() => {
-          const testElement = document.createElement('div');
-          testElement.style.cssText = `position:absolute;visibility:hidden;font-family:${FONT_MAP[fam]};font-size:72px;font-weight:${weight};`;
-          testElement.textContent = 'Test';
-          document.body.appendChild(testElement);
-          
-          const fallbackElement = document.createElement('div');
-          fallbackElement.style.cssText = `position:absolute;visibility:hidden;font-family:serif;font-size:72px;font-weight:${weight};`;
-          fallbackElement.textContent = 'Test';
-          document.body.appendChild(fallbackElement);
-          
-          const fontLoaded = testElement.offsetWidth !== fallbackElement.offsetWidth;
-          console.log(`[GM+ Font] Font "${fam}" weight ${weight} loaded successfully: ${fontLoaded}`);
-          
-          document.body.removeChild(testElement);
-          document.body.removeChild(fallbackElement);
-
-          if (!fontLoaded) {
-            console.warn(`[GM+ Font] Font "${fam}" weight ${weight} failed to load, falling back to system font`);
-          }
-        }, 1000);
+        
+        // Use the FontFace API if available for more reliable detection
+        if (window.FontFace && CSS && CSS.supports && CSS.supports('font-display', 'swap')) {
+          const fontFace = new FontFace(fam, `url(https://fonts.gstatic.com/s/${fontName.toLowerCase()}/v1/${fontName.toLowerCase()}-${weight}.woff2)`);
+          fontFace.load().then(() => {
+            document.fonts.add(fontFace);
+            console.log(`[GM+ Font] Font "${fam}" weight ${weight} loaded via FontFace API`);
+          }).catch(error => {
+            console.warn(`[GM+ Font] FontFace API failed for "${fam}", using CSS fallback:`, error);
+            // Fall back to CSS detection
+            checkFontLoadingFallback(fam, weight);
+          });
+        } else {
+          // Fallback to the existing detection method
+          checkFontLoadingFallback(fam, weight);
+        }
 
         let st = $('#gm-font-style');
         if (!st) { st = document.createElement('style'); st.id = 'gm-font-style'; document.head.appendChild(st); }
@@ -1973,6 +2520,30 @@
       }
 
       localStorage.setItem(KEY, JSON.stringify({ family:fam, weight:weightSel.value, color }));
+    };
+
+    // Separate function for the fallback font detection method
+    const checkFontLoadingFallback = (fam, weight) => {
+      setTimeout(() => {
+        const testElement = document.createElement('div');
+        testElement.style.cssText = `position:absolute;visibility:hidden;font-family:${FONT_MAP[fam]};font-size:72px;font-weight:${weight};`;
+        testElement.textContent = 'Test Text 123';
+        document.body.appendChild(testElement);
+        
+        const fallbackElement = document.createElement('div');
+        fallbackElement.style.cssText = `position:absolute;visibility:hidden;font-family:serif;font-size:72px;font-weight:${weight};`;
+        fallbackElement.textContent = 'Test Text 123';
+        document.body.appendChild(fallbackElement);
+        
+        const fontLoaded = testElement.offsetWidth !== fallbackElement.offsetWidth;
+        
+        if (fontLoaded) {
+          console.log(`[GM+ Font] Font "${fam}" weight ${weight} verified as loaded`);
+        }
+        
+        document.body.removeChild(testElement);
+        document.body.removeChild(fallbackElement);
+      }, 1500); // 1.5 seconds to allow for slower loading
     };
 
     const reset = () => {
@@ -1999,6 +2570,42 @@
 
   function buildCachePane(pane) {
     pane.classList.add('gm-cache-pane');
+
+    // real-time monitor
+    const realtimeSection = document.createElement('div');
+    realtimeSection.style.cssText = 'margin-bottom:16px;padding-bottom:16px;border-bottom:1px solid #333;';
+    
+    const realtimeTitle = document.createElement('h4');
+    realtimeTitle.textContent = 'Real-time Activity';
+    realtimeTitle.style.cssText = 'margin:0 0 8px 0;color:#fff;';
+    
+    const activityIndicator = document.createElement('div');
+    activityIndicator.style.cssText = 'background:#1a1a1a;border:1px solid #333;border-radius:4px;padding:8px;margin-bottom:8px;';
+    activityIndicator.innerHTML = '<div style="font-size:12px;color:#888;">📡 Monitoring for new messages...</div>';
+    
+    const toggleMonitorBtn = document.createElement('button');
+    toggleMonitorBtn.textContent = 'Auto-Cache: ON';
+    toggleMonitorBtn.className = 'gm-btn';
+    toggleMonitorBtn.style.cssText = 'width:100%;background:#28a745;margin-bottom:8px;';
+    
+    let isMonitoring = true;
+    let messageCount = 0;
+    let lastMessageTime = null;
+    
+    toggleMonitorBtn.onclick = () => {
+      isMonitoring = !isMonitoring;
+      toggleMonitorBtn.textContent = `Auto-Cache: ${isMonitoring ? 'ON' : 'OFF'}`;
+      toggleMonitorBtn.style.background = isMonitoring ? '#28a745' : '#6c757d';
+      
+      if (isMonitoring) {
+        activityIndicator.innerHTML = '<div style="font-size:12px;color:#888;">📡 Monitoring resumed...</div>';
+      } else {
+        activityIndicator.innerHTML = '<div style="font-size:12px;color:#f57c00;">⏸️ Monitoring paused</div>';
+      }
+    };
+    
+    realtimeSection.append(realtimeTitle, activityIndicator, toggleMonitorBtn);
+    pane.appendChild(realtimeSection);
 
     // bulk fetch section
     const bulkSection = document.createElement('div');
@@ -2153,17 +2760,31 @@
           } else {
             fetchBtn.textContent = 'No cache found, doing full fetch...';
           }
-          return await legacyFullFetch(type, id, (count, text) => {
+          await legacyFullFetch(type, id, (count, text) => {
             total = count;
             fetchBtn.textContent = text;
           });
+          // Show success for full fetch fallback
+          fetchBtn.textContent = 'Fetch Successful';
+          setTimeout(() => {
+            fetchBtn.textContent = originalText;
+          }, 3000);
+          return;
         }
         
         if (result.alreadyUpToDate) {
           total = result.boundaries.count;
+          fetchBtn.textContent = 'Already Up to Date';
+          setTimeout(() => {
+            fetchBtn.textContent = originalText;
+          }, 3000);
           Modal.alert('Already Up to Date', `Cache is current with ${total} messages.\nLatest message: ${result.boundaries.newestDate.toLocaleString()}`, 'info');
         } else {
           total = result.boundaries.count + result.newMessages.length;
+          fetchBtn.textContent = 'Fetch Successful';
+          setTimeout(() => {
+            fetchBtn.textContent = originalText;
+          }, 3000);
           Modal.alert('Smart Fetch Complete', `Found ${result.newMessages.length} new messages!\n\nTotal cached: ${total} messages\nLatest: ${new Date(result.newMessages[0]?.created_at * 1000 || result.boundaries.newest.created_at * 1000).toLocaleString()}`, 'info');
         }
         
@@ -2172,7 +2793,10 @@
         Modal.alert('Fetch Error', `Smart fetch failed: ${error.message}`, 'error');
       } finally {
         fetchBtn.disabled = false;
-        fetchBtn.textContent = originalText;
+        // Don't reset text immediately if showing success message
+        if (!fetchBtn.textContent.includes('Successful') && !fetchBtn.textContent.includes('Up to Date')) {
+          fetchBtn.textContent = originalText;
+        }
       }
     };
 
@@ -2306,57 +2930,290 @@
       return total;
     }
 
-    const searchSection = document.createElement('div');
-    searchSection.style.cssText = 'margin-bottom: 16px; padding-bottom: 16px; border-bottom: 1px solid #333;';
-    const searchInput = document.createElement('input');
-    searchInput.type = 'text';
-    searchInput.placeholder = 'Search messages...';
-    searchInput.className = 'gm-search-input';
-    searchInput.style.marginBottom = '8px';
-    const searchOptions = document.createElement('div');
-    searchOptions.style.cssText = 'display: flex; gap: 12px; margin-bottom: 8px; font-size: 13px;';
-    const caseSensitiveLabel = document.createElement('label');
-    caseSensitiveLabel.style.cssText = 'display: flex; align-items: center; gap: 4px; color: #ddd; cursor: pointer;';
-    const caseSensitiveCheck = document.createElement('input'); caseSensitiveCheck.type = 'checkbox'; caseSensitiveCheck.id = 'gm-case-sensitive';
-    caseSensitiveLabel.append(caseSensitiveCheck, document.createTextNode('Case sensitive'));
-    const fullWordLabel = document.createElement('label');
-    fullWordLabel.style.cssText = 'display: flex; align-items: center; gap: 4px; color: #ddd; cursor: pointer;';
-    const fullWordCheck = document.createElement('input'); fullWordCheck.type = 'checkbox'; fullWordCheck.id = 'gm-full-word';
-    fullWordLabel.append(fullWordCheck, document.createTextNode('Full word'));
-    searchOptions.append(caseSensitiveLabel, fullWordLabel);
-    const searchBtn = document.createElement('button'); searchBtn.textContent = 'Search'; searchBtn.className = 'gm-btn';
-    searchBtn.style.cssText = 'margin-right: 8px; background: #28a745;';
-    const searchResults = document.createElement('div');
-    searchResults.style.cssText = 'max-height: 300px; overflow-y: auto; margin-top: 8px; display: none;';
-    searchSection.append(searchInput, searchOptions, searchBtn, searchResults);
-    pane.appendChild(searchSection);
+    // Enhanced Data Management Section
+    const managementSection = document.createElement('div');
+    managementSection.style.cssText = 'margin-bottom:16px;padding-bottom:16px;border-bottom:1px solid #333;';
+    
+    const managementTitle = document.createElement('h4');
+    managementTitle.textContent = 'Data Management';
+    managementTitle.style.cssText = 'margin:0 0 8px 0;color:#fff;';
+    
+    // Storage usage display
+    const storageInfo = document.createElement('div');
+    storageInfo.style.cssText = 'background:#1a1a1a;border:1px solid #333;border-radius:4px;padding:8px;margin-bottom:8px;';
+    storageInfo.innerHTML = '<div style="font-size:12px;color:#888;">Loading storage usage...</div>';
+    
+    const managementGrid = document.createElement('div');
+    managementGrid.style.cssText = 'display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px;';
+    
+    const statsBtn = document.createElement('button'); 
+    statsBtn.textContent = 'Cache Stats';
+    statsBtn.className = 'gm-btn';
+    statsBtn.style.cssText = 'background:#6c757d;';
+    
+    const validateBtn = document.createElement('button'); 
+    validateBtn.textContent = 'Validate Cache';
+    validateBtn.className = 'gm-btn';
+    validateBtn.style.cssText = 'background:#17a2b8;';
+    
+    const backupBtn = document.createElement('button'); 
+    backupBtn.textContent = 'Backup Cache';
+    backupBtn.className = 'gm-btn';
+    backupBtn.style.cssText = 'background:#28a745;';
+    
+    const cleanupBtn = document.createElement('button'); 
+    cleanupBtn.textContent = 'Smart Cleanup';
+    cleanupBtn.className = 'gm-btn';
+    cleanupBtn.style.cssText = 'background:#f57c00;color:#000;';
+    
+    managementGrid.append(statsBtn, validateBtn, backupBtn, cleanupBtn);
+    
+    // Import/Export row
+    const importExportRow = document.createElement('div');
+    importExportRow.style.cssText = 'display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px;';
+    
+    const exportBtn = document.createElement('button'); 
+    exportBtn.textContent = 'Export CSV';
+    exportBtn.className = 'gm-btn';
+    exportBtn.style.cssText = 'background:#388e3c;';
+    
+    const clearBtn = document.createElement('button'); 
+    clearBtn.textContent = 'Clear Cache';
+    clearBtn.className = 'gm-btn';
+    clearBtn.style.cssText = 'background:#dc3545;';
+    
+    importExportRow.append(exportBtn, clearBtn);
+    
+    managementSection.append(managementTitle, storageInfo, managementGrid, importExportRow);
+    pane.appendChild(managementSection);
 
-    // Action buttons
-    const statsBtn = document.createElement('button'); statsBtn.textContent = 'Show Stats';
-    const exportBtn = document.createElement('button'); exportBtn.textContent = 'Export CSV';
-    const cleanupBtn = document.createElement('button'); cleanupBtn.textContent = 'Cleanup Old Data';
-    const clearBtn = document.createElement('button'); clearBtn.textContent = 'Clear Cache';
-    [statsBtn, exportBtn, cleanupBtn, clearBtn].forEach(b => b.className = 'gm-btn');
-    exportBtn.style.background = '#388e3c'; cleanupBtn.style.cssText = 'background: #f57c00; color: #000;'; clearBtn.style.background = '#dc3545';
-    const btnContainer = document.createElement('div'); btnContainer.style.cssText = 'display: flex; flex-direction: column; gap: 8px;';
-    btnContainer.append(statsBtn, exportBtn, cleanupBtn, clearBtn); pane.appendChild(btnContainer);
-       // Search functionality
-
-    const performSearch = async () => {
-      const q = searchInput.value.trim(); if (!q) { searchResults.style.display = 'none'; return; }
-      if (!Cache) { Modal.alert('Cache Unavailable','Cache not available','error'); return; }
-      searchBtn.disabled = true; searchBtn.textContent = 'Searching...';
-      const results = await Cache.search(q,{ limit:50, caseSensitive: caseSensitiveCheck.checked, fullWord: fullWordCheck.checked });
-      if (!results.length) searchResults.innerHTML = '<div style="color:#888;text-align:center;padding:16px;">No messages found</div>';
-      else searchResults.innerHTML = results.map(msg=>{
-        const attachmentInfo = msg.attachments?.length ? `<div style="font-size:11px;color:#888;margin-top:4px;">📎 ${msg.attachments.length} attachments: ${msg.attachments.map(a=>a.type||'').join(', ')}</div>` : '';
-        return `<div style="background:#222;margin:4px 0;padding:8px;border-radius:4px;border-left:3px solid #667eea;"><div style="font-size:12px;color:#888;margin-bottom:4px;">${msg.name||'Unknown'} • ${new Date(msg.created_at*1000).toLocaleString()}</div><div style="font-size:14px;color:#ddd;">${(msg.text||'').substring(0,100)}${msg.text.length>100?'...':''}</div>${attachmentInfo}</div>`;
-      }).join('');
-      searchResults.style.display = 'block';
-      searchBtn.disabled = false; searchBtn.textContent = 'Search';
+    // Enhanced Data Management Functions
+    const updateStorageInfo = async () => {
+      try {
+        if (!Cache) {
+          storageInfo.innerHTML = '<div style="font-size:12px;color:#dc3545;">Cache unavailable</div>';
+          return;
+        }
+        
+        const stats = await Cache.stats();
+        const validation = await Cache.validate();
+        
+        // Estimate storage usage
+        const bytesPerChar = 2; // UTF-16 encoding
+        const estimatedSize = validation.totalSize || 0;
+        const sizeInMB = (estimatedSize / (1024 * 1024)).toFixed(2);
+        
+        storageInfo.innerHTML = `
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:12px;">
+            <div>
+              <div style="color:#667eea;font-weight:600;">${stats.messages.toLocaleString()}</div>
+              <div style="color:#888;">Messages</div>
+            </div>
+            <div>
+              <div style="color:#28a745;font-weight:600;">${stats.edits.toLocaleString()}</div>
+              <div style="color:#888;">Edits Tracked</div>
+            </div>
+            <div>
+              <div style="color:#ff9800;font-weight:600;">${sizeInMB} MB</div>
+              <div style="color:#888;">Storage Used</div>
+            </div>
+            <div>
+              <div style="color:#${validation.invalid > 0 ? 'dc3545' : '28a745'};font-weight:600;">${validation.valid.toLocaleString()}</div>
+              <div style="color:#888;">Valid Messages</div>
+            </div>
+          </div>
+          ${validation.invalid > 0 ? `<div style="color:#dc3545;font-size:11px;margin-top:4px;">⚠️ ${validation.invalid} corrupted messages detected</div>` : ''}
+        `;
+      } catch (error) {
+        console.error('[GM+ Storage] Update error:', error);
+        storageInfo.innerHTML = '<div style="font-size:12px;color:#dc3545;">Error loading storage info</div>';
+      }
     };
-    searchBtn.onclick = performSearch; searchInput.addEventListener('keypress',e=>{ if(e.key==='Enter')performSearch(); });
-    statsBtn.onclick = async()=>{ const s=await Cache.stats(); Modal.stats('Cache Statistics',s); };
+    
+    // Initialize storage info
+    updateStorageInfo();
+    
+    statsBtn.onclick = async () => {
+      try {
+        if (!Cache) {
+          Modal.alert('Cache Unavailable', 'Cache not available', 'error');
+          return;
+        }
+        
+        const [stats, validation] = await Promise.all([
+          Cache.stats(),
+          Cache.validate()
+        ]);
+        
+        const sizeInMB = (validation.totalSize / (1024 * 1024)).toFixed(2);
+        
+        const statsHtml = `
+          <div class="gm-modal-stats">
+            <div class="gm-modal-stat">
+              <div class="gm-modal-stat-value">${stats.messages.toLocaleString()}</div>
+              <div class="gm-modal-stat-label">Messages Cached</div>
+            </div>
+            <div class="gm-modal-stat">
+              <div class="gm-modal-stat-value">${stats.edits.toLocaleString()}</div>
+              <div class="gm-modal-stat-label">Edits Tracked</div>
+            </div>
+            <div class="gm-modal-stat">
+              <div class="gm-modal-stat-value">${sizeInMB} MB</div>
+              <div class="gm-modal-stat-label">Storage Used</div>
+            </div>
+            <div class="gm-modal-stat">
+              <div class="gm-modal-stat-value">${validation.valid.toLocaleString()}</div>
+              <div class="gm-modal-stat-label">Valid Messages</div>
+            </div>
+          </div>
+          <div style="margin-top: 16px;">
+            <div style="background:#222;padding:8px;border-radius:4px;margin-bottom:8px;">
+              <strong style="color:#667eea;">Cache Health:</strong> 
+              <span style="color:${validation.invalid === 0 ? '#28a745' : '#f57c00'};">
+                ${validation.invalid === 0 ? 'Excellent' : `${validation.invalid} issues found`}
+              </span>
+            </div>
+            ${validation.issues.length > 0 ? `
+              <div style="background:#1a1a1a;border:1px solid #333;border-radius:4px;padding:8px;">
+                <div style="color:#f57c00;font-size:12px;margin-bottom:4px;font-weight:600;">Cache Issues:</div>
+                ${validation.issues.slice(0, 5).map(issue => `<div style="color:#888;font-size:11px;">• ${issue}</div>`).join('')}
+                ${validation.issues.length > 5 ? `<div style="color:#666;font-size:11px;">... and ${validation.issues.length - 5} more</div>` : ''}
+              </div>
+            ` : ''}
+            <div style="color:#888;font-size:14px;margin-top:12px;">
+              Messages are compressed using LZString for efficient storage.
+            </div>
+          </div>
+        `;
+        
+        Modal.alert('Detailed Cache Statistics', statsHtml, 'info');
+        
+      } catch (error) {
+        console.error('[GM+ Stats] Error:', error);
+        Modal.alert('Stats Error', `Failed to generate statistics: ${error.message}`, 'error');
+      }
+    };
+
+    validateBtn.onclick = async () => {
+      if (!Cache) {
+        Modal.alert('Cache Unavailable', 'Cache not available', 'error');
+        return;
+      }
+      
+      validateBtn.disabled = true;
+      validateBtn.textContent = 'Validating...';
+      
+      try {
+        const validation = await Cache.validate();
+        
+        const validationHtml = `
+          <div style="max-height:300px;overflow-y:auto;">
+            <h3 style="color:#667eea;margin:0 0 16px 0;">Cache Validation Results</h3>
+            
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px;">
+              <div style="background:#1a1a1a;border:1px solid #333;border-radius:4px;padding:12px;text-align:center;">
+                <div style="font-size:24px;font-weight:700;color:#28a745;">${validation.valid.toLocaleString()}</div>
+                <div style="color:#888;font-size:12px;">Valid Messages</div>
+              </div>
+              <div style="background:#1a1a1a;border:1px solid #333;border-radius:4px;padding:12px;text-align:center;">
+                <div style="font-size:24px;font-weight:700;color:${validation.invalid > 0 ? '#dc3545' : '#28a745'};">${validation.invalid.toLocaleString()}</div>
+                <div style="color:#888;font-size:12px;">Invalid Messages</div>
+              </div>
+            </div>
+            
+            <div style="background:#1a1a1a;border:1px solid #333;border-radius:4px;padding:12px;margin-bottom:16px;">
+              <div style="color:#fff;font-weight:600;margin-bottom:8px;">Storage Information</div>
+              <div style="color:#ddd;margin-bottom:4px;">Compressed Size: ${(validation.totalSize / (1024 * 1024)).toFixed(2)} MB</div>
+              <div style="color:#888;font-size:12px;">Estimated uncompressed: ~${(validation.totalSize * 3 / (1024 * 1024)).toFixed(2)} MB</div>
+            </div>
+            
+            ${validation.issues.length > 0 ? `
+              <div style="background:#1a1a1a;border:1px solid #f57c00;border-radius:4px;padding:12px;">
+                <div style="color:#f57c00;font-weight:600;margin-bottom:8px;">Issues Found (${validation.issues.length})</div>
+                ${validation.issues.slice(0, 10).map(issue => `
+                  <div style="color:#ddd;font-size:12px;margin-bottom:4px;padding:4px;background:#333;border-radius:2px;">
+                    ${issue}
+                  </div>
+                `).join('')}
+                ${validation.issues.length > 10 ? `
+                  <div style="color:#888;font-size:11px;margin-top:8px;">
+                    ... and ${validation.issues.length - 10} more issues
+                  </div>
+                ` : ''}
+              </div>
+            ` : `
+              <div style="background:#1a1a1a;border:1px solid #28a745;border-radius:4px;padding:12px;text-align:center;">
+                <div style="color:#28a745;font-size:16px;">✅ Cache is healthy!</div>
+                <div style="color:#888;font-size:12px;margin-top:4px;">No issues detected</div>
+              </div>
+            `}
+          </div>
+        `;
+        
+        Modal.alert('Cache Validation', validationHtml, validation.invalid > 0 ? 'error' : 'info');
+        
+        // Update storage info after validation
+        await updateStorageInfo();
+        
+      } catch (error) {
+        console.error('[GM+ Validation] Error:', error);
+        Modal.alert('Validation Error', `Failed to validate cache: ${error.message}`, 'error');
+      } finally {
+        validateBtn.disabled = false;
+        validateBtn.textContent = 'Validate Cache';
+      }
+    };
+
+    backupBtn.onclick = async () => {
+      if (!Cache) {
+        Modal.alert('Cache Unavailable', 'Cache not available for backup', 'error');
+        return;
+      }
+      
+      backupBtn.disabled = true;
+      backupBtn.textContent = 'Creating Backup...';
+      
+      try {
+        const [messages, stats] = await Promise.all([
+          Cache.all(),
+          Cache.stats()
+        ]);
+        
+        if (!messages.length) {
+          Modal.alert('No Data', 'No messages to backup', 'info');
+          return;
+        }
+        
+        const backup = {
+          version: '1.0',
+          created_at: new Date().toISOString(),
+          stats: stats,
+          messages: messages,
+          metadata: {
+            extension_version: '1.1.1',
+            browser: navigator.userAgent,
+            total_size_estimate: messages.length * 200 // rough estimate
+          }
+        };
+        
+        const backupJson = JSON.stringify(backup, null, 2);
+        const blob = new Blob([backupJson], { type: 'application/json' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = `groupme_cache_backup_${Date.now()}.json`;
+        a.click();
+        
+        Modal.alert('Backup Complete', `Successfully created backup with ${messages.length.toLocaleString()} messages\n\nFile size: ${(blob.size / (1024 * 1024)).toFixed(2)} MB`, 'info');
+        
+      } catch (error) {
+        console.error('[GM+ Backup] Error:', error);
+        Modal.alert('Backup Error', `Failed to create backup: ${error.message}`, 'error');
+      } finally {
+        backupBtn.disabled = false;
+        backupBtn.textContent = 'Backup Cache';
+      }
+    };
+
     exportBtn.onclick = async () => {
       try {
         if (!Cache) {
@@ -2901,11 +3758,11 @@
 
     const fontPane   = paneFactory('fonts');   buildFontPane(fontPane);
     const cachePane  = paneFactory('cache');   buildCachePane(cachePane);
-    const countPane  = paneFactory('counter'); Counter.init(countPane);
+    const statsPane  = paneFactory('stats');   Stats.init(statsPane);
 
     panes.push({ btn: addTrayBtn(tray, SVGs.font,  'Fonts',        () => open(0)), pane: fontPane  });
-    panes.push({ btn: addTrayBtn(tray, SVGs.save,  'Cache',        () => open(1)), pane: cachePane });
-    panes.push({ btn: addTrayBtn(tray, SVGs.bars,  'Chat Viewer',  () => open(2)), pane: countPane });
+    panes.push({ btn: addTrayBtn(tray, SVGs.save,  'MessageCacher', () => open(1)), pane: cachePane });
+    panes.push({ btn: addTrayBtn(tray, SVGs.bars,  'Stats',         () => open(2)), pane: statsPane });
 
     let isDragging = false;
     let dragStartTarget = null;
@@ -3046,6 +3903,31 @@
       const messageCount = Object.keys(ev.data.payload || {}).length;
       console.log(`[GM+ Cache] Received ${messageCount} messages from page script`);
       
+      // Update real-time activity indicator if it exists
+      const indicator = document.querySelector('.gm-cache-pane')?.querySelector('[style*="Monitoring"]')?.parentElement;
+      if (indicator && messageCount > 0) {
+        const isNewMessage = ev.data.metadata?.source === 'realtime' || ev.data.metadata?.new_count > 0;
+        const currentTime = new Date().toLocaleTimeString();
+        
+        if (isNewMessage) {
+          indicator.innerHTML = `
+            <div style="font-size:12px;color:#28a745;">
+              ✅ ${messageCount} new message${messageCount > 1 ? 's' : ''} cached at ${currentTime}
+            </div>
+            <div style="font-size:11px;color:#666;margin-top:2px;">
+              Source: ${ev.data.metadata?.source || 'unknown'} | Batch #${ev.data.metadata?.batch_id || '?'}
+            </div>
+          `;
+          
+          // Reset indicator after 3 seconds
+          setTimeout(() => {
+            if (indicator) {
+              indicator.innerHTML = '<div style="font-size:12px;color:#888;">📡 Monitoring for new messages...</div>';
+            }
+          }, 3000);
+        }
+      }
+      
       if (Cache && messageCount > 0) {
         rateLimiter.add(ev.data.payload);
       } else if (!Cache) {
@@ -3054,7 +3936,7 @@
         console.log('[GM+ Cache] Received empty message payload');
       }
       
-      Counter.handle(ev.data.payload);
+      Stats.handle(ev.data.payload);
     }
   });
 

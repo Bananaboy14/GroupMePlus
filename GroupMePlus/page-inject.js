@@ -47,15 +47,37 @@
   window.WebSocket = function (...args) {
     const ws = new originalWebSocket(...args);
     
+    console.log('📡 WebSocket connection established:', args[0]);
+    
+    // Override onmessage to intercept all messages
     const originalOnMessage = ws.onmessage;
+    ws.onmessage = function(event) {
+      try {
+        const data = JSON.parse(event.data);
+        if (isRealtimeMessage(data)) {
+          console.log('📡 Real-time message intercepted:', data);
+          handleRealtimeMessage(data);
+        }
+      } catch (err) {
+        console.warn('📡 WebSocket message parsing failed:', err);
+      }
+      
+      // Call original handler if it exists
+      if (originalOnMessage) {
+        return originalOnMessage.call(this, event);
+      }
+    };
+    
+    // Also listen for message events
     ws.addEventListener('message', function (event) {
       try {
         const data = JSON.parse(event.data);
         if (isRealtimeMessage(data)) {
+          console.log('📡 Real-time message via addEventListener:', data);
           handleRealtimeMessage(data);
         }
       } catch (err) {
-        console.warn('📡 WebSocket intercept processing failed:', err);
+        console.warn('📡 WebSocket addEventListener parsing failed:', err);
       }
     });
     
