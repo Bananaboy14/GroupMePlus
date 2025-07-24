@@ -69,6 +69,7 @@
       (url.includes('/v3/') && (
         (url.includes('/groups/') && url.includes('/messages')) ||
         url.includes('/direct_messages') ||
+        url.includes('/chats') ||
         url.includes('/likes') ||
         url.includes('/destroy')
       )) ||
@@ -90,7 +91,10 @@
       
       if (!data || !data.response) return;
       
-      const messages = data.response.messages || data.response.direct_messages || [];
+      const messages = data.response.messages || 
+                       data.response.direct_messages || 
+                       data.response || 
+                       (Array.isArray(data.response) ? data.response : []);
       if (!Array.isArray(messages) || messages.length === 0) return;
       
       const processedMessages = {};

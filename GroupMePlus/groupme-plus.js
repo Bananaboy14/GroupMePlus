@@ -22,7 +22,7 @@
     injectPageScript();
   }
 
-  // Helpers
+  // helpers
   const $  = (sel, p = document) => p.querySelector(sel);
   const $$ = (sel, p = document) => [...p.querySelectorAll(sel)];
   const idle = fn => {
@@ -40,7 +40,7 @@
     document.head.appendChild(l);
   };
 
-  // IndexedDB Cache
+  // IndexedDB cache
   const Cache = (() => {
     if (!window.LZString) {
       console.warn('[GM+ Cache] LZString not available, cache disabled');
@@ -77,18 +77,39 @@
     const D = s => JSON.parse(LZString.decompressFromUTF16(s));
 
     const validateMessage = (msg) => {
-      if (!msg || typeof msg !== 'object') return false;
-      if (!msg.id || typeof msg.id !== 'string') return false;
-      if (String(msg.id).includes('.')) return false;
-      if (!msg.created_at && !msg.text && !msg.attachments?.length) return false;
+      if (!msg || typeof msg !== 'object') {
+        console.warn('[GM+ Cache] Invalid message object:', msg);
+        return false;
+      }
+      if (!msg.id || typeof msg.id !== 'string') {
+        console.warn('[GM+ Cache] Missing or invalid message ID:', msg.id, msg);
+        return false;
+      }
+      if (String(msg.id).includes('.')) {
+        console.warn('[GM+ Cache] Message ID contains dots:', msg.id);
+        return false;
+      }
+      if (!msg.created_at && !msg.text && !msg.attachments?.length) {
+        console.warn('[GM+ Cache] Message missing essential content:', {
+          created_at: msg.created_at,
+          text: msg.text,
+          attachments: msg.attachments?.length
+        }, msg);
+        return false;
+      }
       return true;
     };
 
     async function store(batch) {
-      if (!batch || typeof batch !== 'object') return;
+      if (!batch || typeof batch !== 'object') {
+        console.warn('[GM+ Cache] Invalid batch object:', batch);
+        return;
+      }
       
-      const messages = Object.values(batch).filter(validateMessage);
-      if (messages.length === 0) return;
+      const allMessages = Object.values(batch);
+  // Filter and store valid messages
+  const messages = Object.values(batch).filter(validateMessage);
+  if (messages.length === 0) return;
 
       try {
         const db = await open();
@@ -99,18 +120,23 @@
         const messageIds = messages.map(m => m.id);
         const existingMessages = new Map();
         
+  // Identify existing messages
+        
         await Promise.all(messageIds.map(id => 
           new Promise((resolve, reject) => {
             const req = st.get(id);
             req.onsuccess = () => {
               if (req.result) {
                 existingMessages.set(id, req.result);
+                console.log(`[GM+ Cache] Found existing message: ${id}`);
               }
               resolve();
             };
             req.onerror = () => reject(req.error);
           })
         ));
+
+  // Prepare put and edit operations
 
         const putPromises = [];
         const editPromises = [];
@@ -121,10 +147,13 @@
           const existing = existingMessages.get(m.id);
           
           if (!existing) {
+            console.log(`[GM+ Cache] Message ${m.id} is new, will store`);
             putPromises.push(
               new Promise((resolve, reject) => {
-                const req = st.put({ 
-                  id: m.id, 
+                const req = st.put({
+                  id: m.id,
+                  group_id: m.group_id,
+                  created_at: m.created_at,
                   data: C(m),
                   stored_at: Date.now()
                 });
@@ -134,10 +163,12 @@
             );
             newCount++;
           } else {
+            console.log(`[GM+ Cache] Message ${m.id} already exists, checking for edits`);
             const old = D(existing.data);
             if (old.text !== m.text && old.text && m.text && 
                 old.text.trim() !== m.text.trim()) {
               
+              console.log(`[GM+ Cache] Message ${m.id} has been edited`);
               editPromises.push(
                 new Promise((resolve, reject) => {
                   const req = eh.put({
@@ -154,11 +185,12 @@
                 })
               );
               
-              // Update message
               putPromises.push(
                 new Promise((resolve, reject) => {
-                  const req = st.put({ 
-                    id: m.id, 
+                  const req = st.put({
+                    id: m.id,
+                    group_id: m.group_id,
+                    created_at: m.created_at,
                     data: C(m),
                     updated_at: Date.now()
                   });
@@ -167,12 +199,13 @@
                 })
               );
               editCount++;
+            } else {
+              console.log(`[GM+ Cache] Message ${m.id} unchanged, skipping`);
             }
-            // If no changes, skip (don't update)
           }
         }
 
-        // Execute all operations
+        console.log(`[GM+ Cache] About to execute ${putPromises.length} put operations and ${editPromises.length} edit operations`);
         await Promise.all([...putPromises, ...editPromises]);
         
         console.log(`[GM+ Cache] Batch stored: ${newCount} new, ${editCount} edited`);
@@ -514,6 +547,294 @@
   })();
 
   console.log('[GM+ Cache] Cache system initialized:', Cache ? 'enabled' : 'disabled');
+
+  // Smart Incremental Fetching System
+  const SmartFetch = (() => {
+    if (!Cache) {
+      console.warn('[GM+ SmartFetch] Cache not available, smart fetching disabled');
+      return null;
+    }
+
+    // Get cache boundaries for a specific group/DM
+    const getCacheBoundaries = async (chatId, isDM = false) => {
+      try {
+        console.log(`[GM+ SmartFetch] Analyzing cache boundaries for ${isDM ? 'DM' : 'group'} ${chatId}`);
+        
+        let cached = [];
+        if (isDM) {
+          // For DMs, search all messages and filter by conversation participants
+          const allMessages = await Cache.all();
+          cached = allMessages.filter(msg => {
+            // Check if this message involves the specified user in a DM context
+            return (msg.is_dm || msg.conversation_id) && (
+              msg.user_id === chatId || 
+              msg.sender_id === chatId ||
+              msg.dm_other_user_id === chatId ||
+              (msg.conversation_id && msg.conversation_id.includes(chatId))
+            );
+          });
+        } else {
+          // For groups, load entire cache and filter by group_id to avoid limit
+          try {
+            const allMsgs = await Cache.all();
+            cached = allMsgs.filter(msg => msg.group_id === chatId);
+          } catch (e) {
+            console.error('[GM+ SmartFetch] Error loading full cache for group boundaries:', e);
+            cached = [];
+          }
+        }
+
+        if (!cached.length) {
+          console.log(`[GM+ SmartFetch] No cached messages found`);
+          return { newest: null, oldest: null, count: 0, hasCache: false };
+        }
+
+        // Sort by created_at to find boundaries
+        const sorted = cached.sort((a, b) => b.created_at - a.created_at);
+        const newest = sorted[0];
+        const oldest = sorted[sorted.length - 1];
+
+        console.log(`[GM+ SmartFetch] Cache boundaries: ${cached.length} messages from ${new Date(oldest.created_at * 1000).toLocaleDateString()} to ${new Date(newest.created_at * 1000).toLocaleDateString()}`);
+        
+        return {
+          newest,
+          oldest, 
+          count: cached.length,
+          hasCache: true,
+          newestDate: new Date(newest.created_at * 1000),
+          oldestDate: new Date(oldest.created_at * 1000)
+        };
+      } catch (error) {
+        console.error('[GM+ SmartFetch] Error analyzing cache boundaries:', error);
+        return { newest: null, oldest: null, count: 0, hasCache: false };
+      }
+    };
+
+    // Fetch messages since a specific message ID
+    const fetchSince = async (type, chatId, sinceMessageId, sinceTimestamp) => {
+      const headers = getAuthHeaders();
+      let beforeId = null; // Start from newest
+      let newMessages = [];
+      let totalFetched = 0;
+      let batchCount = 0;
+      let retryCount = 0;
+      const maxRetries = 5;
+
+      console.log(`[GM+ SmartFetch] Fetching new messages since ID ${sinceMessageId} (${new Date(sinceTimestamp * 1000).toLocaleString()})`);
+
+      try {
+        while (true) {
+          batchCount++;
+          let url = '';
+          if (type === 'group') {
+            url = `https://api.groupme.com/v3/groups/${chatId}/messages?acceptFiles=1&limit=100${beforeId ? `&before_id=${beforeId}` : ''}`;
+          } else {
+            url = `https://api.groupme.com/v3/direct_messages?acceptFiles=1&limit=100&other_user_id=${chatId}${beforeId ? `&before_id=${beforeId}` : ''}`;
+          }
+
+          try {
+            console.log(`[GM+ SmartFetch] Batch ${batchCount}: ${url}`);
+            const resp = await fetch(url, { headers, credentials: 'omit' });
+            
+            if (!resp.ok) {
+              if (resp.status === 429) {
+                // Rate limited - exponential backoff
+                retryCount++;
+                if (retryCount > maxRetries) {
+                  console.error(`[GM+ SmartFetch] Rate limit exceeded after ${maxRetries} retries`);
+                  throw new Error(`Rate limit exceeded after ${maxRetries} retries`);
+                }
+                
+                const backoffTime = Math.pow(1.5, retryCount) * 1000;
+                console.warn(`[GM+ SmartFetch] Rate limited (429), retrying in ${backoffTime}ms (attempt ${retryCount}/${maxRetries})`);
+                await new Promise(resolve => setTimeout(resolve, backoffTime));
+                batchCount--; // Don't count this as a batch
+                continue; // Retry the same request
+              } else if (resp.status === 304) {
+                console.log(`[GM+ SmartFetch] No more messages (304)`);
+                break;
+              } else {
+                console.warn(`[GM+ SmartFetch] API request failed: ${resp.status} ${resp.statusText}`);
+                throw new Error(`API request failed: ${resp.status} ${resp.statusText}`);
+              }
+            }
+
+            // Reset retry count on success
+            retryCount = 0;
+
+            const jd = await resp.json();
+            let msgs = [];
+            
+            if (type === 'group') {
+              msgs = (jd.response && jd.response.messages) || [];
+            } else {
+              msgs = (jd.response && jd.response.direct_messages) || [];
+            }
+
+            if (!msgs.length) {
+              console.log(`[GM+ SmartFetch] No more messages in batch ${batchCount}`);
+              break;
+            }
+
+            totalFetched += msgs.length;
+            console.log(`[GM+ SmartFetch] Batch ${batchCount}: ${msgs.length} messages (total: ${totalFetched})`);
+
+            // Check if we've reached our cached boundary
+            let hitBoundary = false;
+            let newBatchMessages = [];
+
+            for (const msg of msgs) {
+              if (msg.id === sinceMessageId || msg.created_at <= sinceTimestamp) {
+                console.log(`[GM+ SmartFetch] Hit cache boundary at message ${msg.id}`);
+                hitBoundary = true;
+                break;
+              }
+              newBatchMessages.push(msg);
+            }
+
+            newMessages.push(...newBatchMessages);
+
+            if (hitBoundary) {
+              console.log(`[GM+ SmartFetch] Reached cache boundary. Found ${newMessages.length} new messages.`);
+              break;
+            }
+
+            // Set up for next batch
+            beforeId = msgs[msgs.length - 1].id;
+
+            // Safety limit to prevent infinite loops
+            if (batchCount > 500) {
+              console.warn(`[GM+ SmartFetch] Hit safety limit of 500 batches`);
+              break;
+            }
+
+            // Small delay to be nice to the API
+            await new Promise(resolve => setTimeout(resolve, 10));
+            
+          } catch (error) {
+            if (error.name === 'TypeError' && error.message.includes('fetch')) {
+              // Network error - treat like rate limit
+              retryCount++;
+              if (retryCount > maxRetries) {
+                console.error(`[GM+ SmartFetch] Network error after ${maxRetries} retries:`, error);
+                throw error;
+              }
+              
+              const backoffTime = Math.pow(1.5, retryCount) * 1000;
+              console.warn(`[GM+ SmartFetch] Network error, retrying in ${backoffTime}ms (attempt ${retryCount}/${maxRetries}):`, error.message);
+              await new Promise(resolve => setTimeout(resolve, backoffTime));
+              batchCount--; // Don't count this as a batch
+              continue; // Retry the same request
+            } else {
+              // Other errors - rethrow
+              throw error;
+            }
+          }
+        }
+
+        console.log(`[GM+ SmartFetch] Incremental fetch complete: ${newMessages.length} new messages in ${batchCount} batches`);
+        return newMessages;
+
+      } catch (error) {
+        console.error('[GM+ SmartFetch] Error in fetchSince:', error);
+        throw error;
+      }
+    };
+
+    // Main smart fetch function
+    const smartFetch = async (type, chatId, progressCallback) => {
+      try {
+        const boundaries = await getCacheBoundaries(chatId, type === 'dm');
+        
+        if (!boundaries.hasCache) {
+          console.log(`[GM+ SmartFetch] No cache found, falling back to full fetch`);
+          return { mode: 'full', boundaries };
+        }
+
+        console.log(`[GM+ SmartFetch] Found cache with ${boundaries.count} messages. Newest: ${boundaries.newestDate.toLocaleString()}`);
+        
+        // Step 1: Check for newer messages
+        if (progressCallback) {
+          progressCallback(`Checking for new messages since ${boundaries.newestDate.toLocaleDateString()}...`);
+        }
+
+        const newMessages = await fetchSince(type, chatId, boundaries.newest.id, boundaries.newest.created_at);
+        
+        let totalNewMessages = newMessages.length;
+        
+        if (newMessages.length > 0) {
+          // store new messages
+          const batch = Object.fromEntries(newMessages.map(m => [m.id, m]));
+          await Cache.store(batch);
+          console.log(`[GM+ SmartFetch] Stored ${newMessages.length} newer messages`);
+        }
+        
+        // check for older messages
+        if (progressCallback) {
+          progressCallback(`Checking for older messages before ${boundaries.oldestDate.toLocaleDateString()}...`);
+        }
+        
+        // fetch one batch of older messages to check for gaps
+        const headers = getAuthHeaders();
+        let olderUrl = '';
+        if (type === 'group') {
+          olderUrl = `https://api.groupme.com/v3/groups/${chatId}/messages?acceptFiles=1&limit=100&before_id=${boundaries.oldest.id}`;
+        } else {
+          olderUrl = `https://api.groupme.com/v3/direct_messages?acceptFiles=1&limit=100&other_user_id=${chatId}&before_id=${boundaries.oldest.id}`;
+        }
+        
+        try {
+          console.log(`[GM+ SmartFetch] Checking for older messages: ${olderUrl}`);
+          const olderResp = await fetch(olderUrl, { headers, credentials: 'omit' });
+          
+          let olderMessages = [];
+          if (olderResp.ok) {
+            const olderData = await olderResp.json();
+            if (type === 'group') {
+              olderMessages = (olderData.response && olderData.response.messages) || [];
+            } else {
+              olderMessages = (olderData.response && olderData.response.direct_messages) || [];
+            }
+          }
+          
+          if (olderMessages.length > 0) {
+            console.log(`[GM+ SmartFetch] Found ${olderMessages.length} older messages - cache has gaps. Falling back to full fetch for complete history.`);
+            return { mode: 'full', boundaries, reason: 'gaps_in_history' };
+          } else {
+            console.log(`[GM+ SmartFetch] No older messages found - cache appears complete.`);
+          }
+          
+        } catch (error) {
+          console.warn(`[GM+ SmartFetch] Could not check for older messages:`, error);
+        }
+        
+        if (totalNewMessages === 0) {
+          console.log(`[GM+ SmartFetch] No new messages found. Cache is up to date.`);
+          return { 
+            mode: 'incremental', 
+            newMessages: [], 
+            boundaries,
+            alreadyUpToDate: true 
+          };
+        }
+
+        return { 
+          mode: 'incremental', 
+          newMessages, 
+          boundaries,
+          alreadyUpToDate: false 
+        };
+
+      } catch (error) {
+        console.error('[GM+ SmartFetch] Error in smart fetch:', error);
+        return { mode: 'error', error, boundaries: null };
+      }
+    };
+
+    return { getCacheBoundaries, fetchSince, smartFetch };
+  })();
+
+  console.log('[GM+ SmartFetch] Smart fetching system initialized:', SmartFetch ? 'enabled' : 'disabled');
 
   function getAuthHeaders() {
     // Try to extract the access token from various sources
@@ -1115,7 +1436,6 @@
     };
   }
 
-  // Add buttons to the tray
   function ensureSeparator(tray) {
     if ($('.gm-plus-sep', tray)) return;
     const sep = document.createElement('div');
@@ -1135,10 +1455,8 @@
     return b;
   }
 
-  // Panes for the tools
   const Counter = (() => {
-    // Legacy counter - now replaced with chat viewer functionality
-    const handle = () => {}; // No-op
+    const handle = () => {};
     const init = pane => {
       buildChatViewerPane(pane);
     };
@@ -1148,7 +1466,6 @@
   function buildChatViewerPane(pane) {
     pane.style.cssText = 'padding: 12px;';
     
-    // Chat selection dropdown
     const selectSection = document.createElement('div');
     selectSection.style.cssText = 'margin-bottom: 16px; padding-bottom: 16px; border-bottom: 1px solid #333;';
     
@@ -1197,17 +1514,43 @@
         }
       } catch (e) { console.warn('Chat Viewer: failed to load groups', e); }
       try {
-        const dResp = await fetch('https://api.groupme.com/v3/direct_messages?acceptFiles=1&limit=100', { headers, credentials: 'omit' });
+        // Use the chats API which returns a better structure for DM conversations
+        const dResp = await fetch('https://api.groupme.com/v3/chats', { headers, credentials: 'omit' });
         if (dResp.ok) {
           const dd = await dResp.json();
+          console.log('[GM+ Chat Viewer] DM conversations response:', dd);
           (dd.response || []).forEach(dm => {
             const opt = document.createElement('option');
             opt.value = `dm:${dm.other_user.id}`;
-            opt.textContent = dm.other_user.name;
+            opt.textContent = `${dm.other_user.name} (DM)`;
             chatSelect.appendChild(opt);
           });
+        } else {
+          console.warn('[GM+ Chat Viewer] Chats API failed, trying direct_messages fallback');
+          // Fallback to direct_messages endpoint if chats fails
+          const fallbackResp = await fetch('https://api.groupme.com/v3/direct_messages?acceptFiles=1&limit=100', { headers, credentials: 'omit' });
+          if (fallbackResp.ok) {
+            const fallbackData = await fallbackResp.json();
+            console.log('[GM+ Chat Viewer] Direct messages fallback response:', fallbackData);
+            // Extract unique users from direct messages
+            const users = new Map();
+            (fallbackData.response || []).forEach(msg => {
+              if (msg.user_id && msg.name && !users.has(msg.user_id)) {
+                users.set(msg.user_id, msg.name);
+              }
+            });
+            users.forEach((name, userId) => {
+              const opt = document.createElement('option');
+              opt.value = `dm:${userId}`;
+              opt.textContent = `${name} (DM)`;
+              chatSelect.appendChild(opt);
+            });
+          }
         }
-      } catch (e) { console.warn('Chat Viewer: failed to load DMs', e); }
+      } catch (e) { 
+        console.warn('Chat Viewer: failed to load DMs', e); 
+        console.log('[GM+ Chat Viewer] Error details:', e);
+      }
     })();
     
     // Load cached messages for selected chat
@@ -1293,7 +1636,7 @@
       let total = 0;
       const headers = getAuthHeaders();
       let retryCount = 0;
-      const maxRetries = 3;
+      const maxRetries = 5;
       
       try {
         refetchBtn.textContent = 'Fetching...';
@@ -1309,10 +1652,10 @@
             const resp = await fetch(url, { headers, credentials: 'omit' });
             
             if (resp.status === 429) {
-              // Rate limited - wait and retry
+              // wait and retry when rate limited
               if (retryCount < maxRetries) {
                 retryCount++;
-                const waitTime = Math.pow(2, retryCount) * 1000; // Exponential backoff
+                const waitTime = Math.pow(1.5, retryCount) * 1000; // exponential backoff
                 refetchBtn.textContent = `Rate limited, waiting ${waitTime/1000}s...`;
                 await new Promise(resolve => setTimeout(resolve, waitTime));
                 continue;
@@ -1326,7 +1669,18 @@
             }
             
             const jd = await resp.json();
-            const msgs = (jd.response && jd.response.messages) || jd.response || [];
+            console.log(`[GM+ Chat Viewer] API response for ${type}:`, jd);
+            
+            // handle different response structures for groups and DMs
+            let msgs = [];
+            if (type === 'group') {
+              msgs = (jd.response && jd.response.messages) || [];
+            } else {
+              msgs = (jd.response && jd.response.direct_messages) || [];
+              console.log(`[GM+ Chat Viewer] Found ${msgs.length} direct messages in response`);
+            }
+            
+            console.log(`[GM+ Chat Viewer] Extracted ${msgs.length} messages from response`);
             if (!msgs.length) break;
             
             const batch = Object.fromEntries(msgs.map(m => [m.id, m]));
@@ -1497,7 +1851,7 @@
       }
     });
     
-    // Hide dropdown when clicking outside
+    // hide dropdown when clicking outside
     document.addEventListener('click', (e) => {
       if (!dropdownContainer.contains(e.target)) {
         hideDropdown();
@@ -1631,7 +1985,7 @@
       const st = $('#gm-font-style');
       if (st) st.remove();
       
-      // Clear localstorage
+      // clear localstorage
       localStorage.removeItem(KEY);
       
       console.log('[GM+ Font] Reset to defaults');
@@ -1646,7 +2000,7 @@
   function buildCachePane(pane) {
     pane.classList.add('gm-cache-pane');
 
-    // Bulk Fetch section: select a group or DM and fetch all messages
+    // bulk fetch section
     const bulkSection = document.createElement('div');
     bulkSection.style.cssText = 'margin-bottom:16px;padding-bottom:16px;border-bottom:1px solid #333;';
     const bulkTitle = document.createElement('h4');
@@ -1657,14 +2011,26 @@
     const defaultOption = document.createElement('option'); defaultOption.value = ''; defaultOption.textContent = 'Select Group or DM...';
     convSelect.appendChild(defaultOption);
     const fetchBtn = document.createElement('button');
-    fetchBtn.textContent = 'Fetch All Messages';
+    fetchBtn.textContent = 'Smart Fetch Messages';
     fetchBtn.className = 'gm-btn';
-    fetchBtn.style.cssText = 'width:100%;background:#17a2b8;margin-bottom:12px;';
-    bulkSection.append(bulkTitle, convSelect, fetchBtn);
+    fetchBtn.style.cssText = 'width:100%;background:#17a2b8;margin-bottom:8px;';
+    
+    const analyzeBtn = document.createElement('button');
+    analyzeBtn.textContent = 'Analyze Cache';
+    analyzeBtn.className = 'gm-btn';
+    analyzeBtn.style.cssText = 'width:100%;background:#28a745;margin-bottom:8px;';
+    
+    const fullFetchBtn = document.createElement('button');
+    fullFetchBtn.textContent = 'Full Fetch (Override)';
+    fullFetchBtn.className = 'gm-btn';
+    fullFetchBtn.style.cssText = 'width:100%;background:#dc3545;margin-bottom:8px;';
+    
+    bulkSection.append(bulkTitle, convSelect, fetchBtn, analyzeBtn, fullFetchBtn);
     pane.appendChild(bulkSection);
 
-    // Populate conversation list (groups and DMs)
-    (async () => {
+    convSelect.addEventListener('change', () => {
+      fetchBtn.textContent = 'Smart Fetch Messages';
+    });    (async () => {
       const headers = getAuthHeaders();
       try {
         const gResp = await fetch('https://api.groupme.com/v3/groups', { headers, credentials: 'omit' });
@@ -1679,57 +2045,266 @@
         }
       } catch (e) { console.warn('Bulk Fetch: failed to load groups', e); }
       try {
-        const dResp = await fetch('https://api.groupme.com/v3/direct_messages?acceptFiles=1&limit=100', { headers, credentials: 'omit' });
+        const dResp = await fetch('https://api.groupme.com/v3/chats', { headers, credentials: 'omit' });
         if (dResp.ok) {
           const dd = await dResp.json();
+          console.log('[GM+ Bulk Fetch] DM conversations response:', dd);
           (dd.response || []).forEach(dm => {
             const opt = document.createElement('option');
             opt.value = `dm:${dm.other_user.id}`;
-            opt.textContent = dm.other_user.name;
+            opt.textContent = `${dm.other_user.name} (DM)`;
             convSelect.appendChild(opt);
           });
+        } else {
+          console.warn('[GM+ Bulk Fetch] Chats API failed, trying direct_messages fallback');
+          // Fallback to direct_messages endpoint if chats fails
+          const fallbackResp = await fetch('https://api.groupme.com/v3/direct_messages?acceptFiles=1&limit=100', { headers, credentials: 'omit' });
+          if (fallbackResp.ok) {
+            const fallbackData = await fallbackResp.json();
+            console.log('[GM+ Bulk Fetch] Direct messages fallback response:', fallbackData);
+            // Extract unique users from direct messages
+            const users = new Map();
+            (fallbackData.response || []).forEach(msg => {
+              if (msg.user_id && msg.name && !users.has(msg.user_id)) {
+                users.set(msg.user_id, msg.name);
+              }
+            });
+            users.forEach((name, userId) => {
+              const opt = document.createElement('option');
+              opt.value = `dm:${userId}`;
+              opt.textContent = `${name} (DM)`;
+              convSelect.appendChild(opt);
+            });
+          }
         }
-      } catch (e) { console.warn('Bulk Fetch: failed to load DMs', e); }
+      } catch (e) { 
+        console.warn('Bulk Fetch: failed to load DMs', e); 
+        console.log('[GM+ Bulk Fetch] Error details:', e);
+      }
     })();
 
-    // Fetch and cache all messages on button click
+    // Analyze cache button - shows what's cached and what would be fetched
+    analyzeBtn.onclick = async () => {
+      const sel = convSelect.value;
+      if (!sel) return Modal.alert('Select Conversation', 'Please select a group or direct message.', 'error');
+      
+      if (!SmartFetch) return Modal.alert('Smart Fetch Unavailable', 'Smart fetching requires cache to be enabled.', 'error');
+      
+      analyzeBtn.disabled = true;
+      analyzeBtn.textContent = 'Analyzing...';
+      
+      try {
+        const [type, id] = sel.split(':');
+        const boundaries = await SmartFetch.getCacheBoundaries(id, type === 'dm');
+        
+        let message = '';
+        if (!boundaries.hasCache) {
+          message = `No cached messages found.\nFull fetch will download all messages.`;
+          fetchBtn.textContent = 'Smart Fetch (Full Download)';
+        } else {
+          message = `Cache Analysis:\n\n• ${boundaries.count} messages cached\n• From: ${boundaries.oldestDate.toLocaleDateString()}\n• To: ${boundaries.newestDate.toLocaleDateString()}\n\nSmart fetch will only download new messages since ${boundaries.newestDate.toLocaleDateString()}.`;
+          fetchBtn.textContent = `Smart Fetch (New Since ${boundaries.newestDate.toLocaleDateString()})`;
+        }
+        
+        Modal.alert('Cache Analysis', message, 'info');
+      } catch (error) {
+        console.error('[GM+ Analyze] Error:', error);
+        Modal.alert('Analysis Error', `Failed to analyze cache: ${error.message}`, 'error');
+      } finally {
+        analyzeBtn.disabled = false;
+        analyzeBtn.textContent = 'Analyze Cache';
+      }
+    };
+
+    // Smart fetch button - uses incremental fetching when possible
     fetchBtn.onclick = async () => {
       const sel = convSelect.value;
       if (!sel) return Modal.alert('Select Conversation', 'Please select a group or direct message.', 'error');
+      
       fetchBtn.disabled = true;
-      let [type, id] = sel.split(':');
+      const originalText = fetchBtn.textContent;
+      let total = 0;
+      
+      try {
+        const [type, id] = sel.split(':');
+        
+        if (!SmartFetch) {
+          // Fallback to original fetch method if smart fetch unavailable
+          console.log('[GM+ Bulk Fetch] Smart fetch unavailable, using full fetch');
+          fetchBtn.textContent = 'Using full fetch...';
+          return await legacyFullFetch(type, id, (count, text) => {
+            total = count;
+            fetchBtn.textContent = text;
+          });
+        }
+        
+        const result = await SmartFetch.smartFetch(type, id, (status) => {
+          fetchBtn.textContent = status;
+        });
+        
+        if (result.mode === 'error') {
+          throw result.error;
+        }
+        
+        if (result.mode === 'full') {
+          // No cache found or gaps detected, do full fetch
+          if (result.reason === 'gaps_in_history') {
+            fetchBtn.textContent = 'Gaps in cache detected, doing full fetch...';
+          } else {
+            fetchBtn.textContent = 'No cache found, doing full fetch...';
+          }
+          return await legacyFullFetch(type, id, (count, text) => {
+            total = count;
+            fetchBtn.textContent = text;
+          });
+        }
+        
+        if (result.alreadyUpToDate) {
+          total = result.boundaries.count;
+          Modal.alert('Already Up to Date', `Cache is current with ${total} messages.\nLatest message: ${result.boundaries.newestDate.toLocaleString()}`, 'info');
+        } else {
+          total = result.boundaries.count + result.newMessages.length;
+          Modal.alert('Smart Fetch Complete', `Found ${result.newMessages.length} new messages!\n\nTotal cached: ${total} messages\nLatest: ${new Date(result.newMessages[0]?.created_at * 1000 || result.boundaries.newest.created_at * 1000).toLocaleString()}`, 'info');
+        }
+        
+      } catch (error) {
+        console.error('[GM+ Smart Fetch] Error:', error);
+        Modal.alert('Fetch Error', `Smart fetch failed: ${error.message}`, 'error');
+      } finally {
+        fetchBtn.disabled = false;
+        fetchBtn.textContent = originalText;
+      }
+    };
+
+    fullFetchBtn.onclick = async () => {
+      const sel = convSelect.value;
+      if (!sel) return Modal.alert('Select Conversation', 'Please select a group or direct message.', 'error');
+      
+      Modal.confirm(
+        'Full Fetch Override',
+        'This will download ALL messages, even if they are already cached. This may take a long time and use significant bandwidth. Are you sure?',
+        async () => {
+          fullFetchBtn.disabled = true;
+          const originalText = fullFetchBtn.textContent;
+          let total = 0;
+          
+          try {
+            const [type, id] = sel.split(':');
+            await legacyFullFetch(type, id, (count, text) => {
+              total = count;
+              fullFetchBtn.textContent = text;
+            });
+            Modal.alert('Full Fetch Complete', `Downloaded and cached ${total} messages.`, 'info');
+          } catch (error) {
+            console.error('[GM+ Full Fetch] Error:', error);
+            Modal.alert('Full Fetch Error', `Failed: ${error.message}`, 'error');
+          } finally {
+            fullFetchBtn.disabled = false;
+            fullFetchBtn.textContent = originalText;
+          }
+        }
+      );
+    };
+
+    async function legacyFullFetch(type, id, progressCallback) {
       let beforeId = '';
       let total = 0;
       const headers = getAuthHeaders();
-      try {
-        while (true) {
-          let url = '';
-          if (type === 'group') {
-            url = `https://api.groupme.com/v3/groups/${id}/messages?acceptFiles=1&limit=100${beforeId?`&before_id=${beforeId}`:''}`;
-          } else {
-            url = `https://api.groupme.com/v3/direct_messages?acceptFiles=1&limit=100&other_user_id=${id}${beforeId?`&before_id=${beforeId}`:''}`;
-          }
+      let retryCount = 0;
+      const maxRetries = 5;
+      
+      while (true) {
+        let url = '';
+        if (type === 'group') {
+          url = `https://api.groupme.com/v3/groups/${id}/messages?acceptFiles=1&limit=100${beforeId?`&before_id=${beforeId}`:''}`;
+        } else {
+          url = `https://api.groupme.com/v3/direct_messages?acceptFiles=1&limit=100&other_user_id=${id}${beforeId?`&before_id=${beforeId}`:''}`;
+        }
+        
+        try {
+          console.log(`[GM+ Legacy Fetch] Fetching ${type} messages from:`, url);
           const resp = await fetch(url, { headers, credentials: 'omit' });
-          if (!resp.ok) break;
+          
+          if (!resp.ok) {
+            if (resp.status === 429) {
+              retryCount++;
+              if (retryCount > maxRetries) {
+                console.error(`[GM+ Legacy Fetch] Rate limit exceeded after ${maxRetries} retries`);
+                throw new Error(`Rate limit exceeded after ${maxRetries} retries`);
+              }
+              
+              const backoffTime = Math.pow(1.5, retryCount) * 1000; // 1.5s, 2.25s, 3.375s
+              console.warn(`[GM+ Legacy Fetch] Rate limited (429), retrying in ${backoffTime}ms (attempt ${retryCount}/${maxRetries})`);
+              
+              if (progressCallback) {
+                progressCallback(total, `Rate limited, retrying in ${Math.round(backoffTime/1000)}s... (${total} messages so far)`);
+              }
+              
+              await new Promise(resolve => setTimeout(resolve, backoffTime));
+              continue; // Retry the same request
+            } else if (resp.status === 304) {
+              // No more messages
+              console.log(`[GM+ Legacy Fetch] No more messages (304)`);
+              break;
+            } else {
+              console.warn(`[GM+ Legacy Fetch] API request failed: ${resp.status} ${resp.statusText}`);
+              throw new Error(`API request failed: ${resp.status} ${resp.statusText}`);
+            }
+          }
+          
+          // Reset retry count on success
+          retryCount = 0;
+          
           const jd = await resp.json();
-          const msgs = (jd.response && jd.response.messages) || jd.response || [];
+          let msgs = [];
+          if (type === 'group') {
+            msgs = (jd.response && jd.response.messages) || [];
+          } else {
+            msgs = (jd.response && jd.response.direct_messages) || [];
+          }
+          
           if (!msgs.length) break;
+          
           const batch = Object.fromEntries(msgs.map(m => [m.id, m]));
           await Cache.store(batch);
           total += msgs.length;
-          fetchBtn.textContent = `Fetched ${total} messages...`;
+          
+          if (progressCallback) {
+            progressCallback(total, `Fetched ${total} messages...`);
+          }
+          
           beforeId = msgs[msgs.length - 1].id;
-          // immediate next request, no artificial delay
+          
+          // Small delay to be nice to the API
+          await new Promise(resolve => setTimeout(resolve, 10));
+          
+        } catch (error) {
+          if (error.name === 'TypeError' && error.message.includes('fetch')) {
+            // Network error - treat like rate limit
+            retryCount++;
+            if (retryCount > maxRetries) {
+              console.error(`[GM+ Legacy Fetch] Network error after ${maxRetries} retries:`, error);
+              throw error;
+            }
+            
+            const backoffTime = Math.pow(1.5, retryCount) * 1000;
+            console.warn(`[GM+ Legacy Fetch] Network error, retrying in ${backoffTime}ms (attempt ${retryCount}/${maxRetries}):`, error.message);
+            
+            if (progressCallback) {
+              progressCallback(total, `Network error, retrying in ${Math.round(backoffTime/1000)}s... (${total} messages so far)`);
+            }
+            
+            await new Promise(resolve => setTimeout(resolve, backoffTime));
+            continue; // Retry the same request
+          } else {
+            // Other errors - rethrow
+            throw error;
+          }
         }
-        Modal.alert('Fetch Complete', `Fetched and cached ${total} messages.`, 'info');
-      } catch (e) {
-        console.error('Bulk Fetch error', e);
-        Modal.alert('Error', `Fetch failed: ${e.message}`, 'error');
-      } finally {
-        fetchBtn.disabled = false;
-        fetchBtn.textContent = 'Fetch All Messages';
       }
-    };
+      
+      return total;
+    }
 
     const searchSection = document.createElement('div');
     searchSection.style.cssText = 'margin-bottom: 16px; padding-bottom: 16px; border-bottom: 1px solid #333;';
