@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  // Inject the page script to intercept API calls
+  // inject the page script to intercept API calls
   const injectPageScript = () => {
     const script = document.createElement('script');
     script.src = chrome.runtime.getURL('page-inject.js');
@@ -15,7 +15,7 @@
     (document.head || document.documentElement).appendChild(script);
   };
 
-  // Wait for DOM and inject
+  // wait for DOM and inject
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', injectPageScript);
   } else {
@@ -38,7 +38,6 @@
     l.href = href;
     l.onerror = (error) => {
       console.error(`[GM+ Font] CSS failed to load: ${href}`, error);
-      // Check if it's a CSP issue
       if (href.includes('fonts.googleapis.com')) {
         console.warn('[GM+ Font] Google Fonts blocked by CSP - check manifest.json content_security_policy');
       }
@@ -384,7 +383,7 @@
       }
     };
 
-    const getByGroup = async (groupId, limit = 1000) => {
+    const getByGroup = async (groupId, limit = 1000000) => {
       try {
         const db = await open();
         return new Promise((resolve, reject) => {
@@ -834,10 +833,10 @@
   console.log('[GM+ SmartFetch] Smart fetching system initialized:', SmartFetch ? 'enabled' : 'disabled');
 
   function getAuthHeaders() {
-    // Try to extract the access token from various sources
+    // try to extract the access token from various sources
     let accessToken = null;
     
-    // Method 1: Check for token in localStorage
+    // method 1: Check for token in localStorage
     try {
       const appData = localStorage.getItem('app');
       if (appData) {
@@ -846,7 +845,7 @@
       }
     } catch (e) {}
     
-    // Method 2: Check for token in sessionStorage
+    // method 2: Check for token in sessionStorage
     if (!accessToken) {
       try {
         const sessionData = sessionStorage.getItem('access_token') || sessionStorage.getItem('token');
@@ -856,7 +855,7 @@
       } catch (e) {}
     }
     
-    // Method 3: Try to extract from page context/window
+    // method 3: Try to extract from page context/window
     if (!accessToken) {
       try {
         accessToken = window.GroupMe?.accessToken || 
@@ -866,7 +865,7 @@
       } catch (e) {}
     }
     
-    // Method 4: Check for token in cookies
+    // method 4: Check for token in cookies
     if (!accessToken) {
       try {
         const cookies = document.cookie.split(';');
@@ -896,6 +895,316 @@
     
     return headers;
   }
+
+  let userMappingCache = null;
+  let userMappingCacheTime = 0;
+  const USER_MAPPING_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+
+  const getUserMapping = async () => {
+    const now = Date.now();
+    if (userMappingCache && (now - userMappingCacheTime < USER_MAPPING_CACHE_TTL)) {
+      return userMappingCache;
+    }
+
+    console.log('[GM+ User Mapping] Building user ID to name mapping...');
+    const mapping = new Map();
+    
+    try {
+      const dbs = await indexedDB.databases();
+      const gmDb = dbs.find(d => d.name?.startsWith('GroupMe'));
+      
+      if (!gmDb) {
+        console.warn('[GM+ User Mapping] No GroupMe IndexedDB found');
+        return mapping;
+      }
+      
+      console.log(`[GM+ User Mapping] Found GroupMe database: ${gmDb.name}`);
+      
+      const db = await new Promise((resolve, reject) => {
+        const req = indexedDB.open(gmDb.name, gmDb.version);
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+      });
+      
+      if (db.objectStoreNames.contains('DMs')) {
+        const dms = await new Promise((resolve, reject) => {
+          const tx = db.transaction('DMs', 'readonly');
+          const store = tx.objectStore('DMs');
+          const req = store.getAll();
+          req.onsuccess = () => resolve(req.result);
+          req.onerror = () => reject(req.error);
+        });
+        
+        console.log(`[GM+ User Mapping] Found ${dms.length} DMs in IndexedDB`);
+        
+        dms.forEach(dm => {
+          if (dm.id && dm.other_user?.name) {
+            mapping.set(dm.id, dm.other_user.name);
+            console.log(`[GM+ User Mapping] Mapped DM ${dm.id} -> ${dm.other_user.name}`);
+          }
+        });
+      } else {
+        console.warn('[GM+ User Mapping] DMs store not found in database');
+      }
+      
+      db.close();
+      
+      console.log(`[GM+ User Mapping] Built mapping for ${mapping.size} users`);
+      userMappingCache = mapping;
+      userMappingCacheTime = now;
+      return mapping;
+      
+    } catch (error) {
+      console.error('[GM+ User Mapping] Error building mapping:', error);
+      return new Map();
+    }
+  };
+
+  let groupMappingCache = null;
+  let groupMappingCacheTime = 0;
+  const GROUP_MAPPING_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+
+  const getGroupMapping = async () => {
+    const now = Date.now();
+    if (groupMappingCache && (now - groupMappingCacheTime < GROUP_MAPPING_CACHE_TTL)) {
+      return groupMappingCache;
+    }
+
+    console.log('[GM+ Group Mapping] Building group ID to name mapping...');
+    const mapping = new Map();
+    
+    try {
+      const dbs = await indexedDB.databases();
+      const gmDb = dbs.find(d => d.name?.startsWith('GroupMe'));
+      
+      if (!gmDb) {
+        console.warn('[GM+ Group Mapping] No GroupMe IndexedDB found');
+        return mapping;
+      }
+      
+      console.log(`[GM+ Group Mapping] Found GroupMe database: ${gmDb.name}`);
+      
+      const db = await new Promise((resolve, reject) => {
+        const req = indexedDB.open(gmDb.name, gmDb.version);
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+      });
+      
+      if (db.objectStoreNames.contains('Groups')) {
+        const groups = await new Promise((resolve, reject) => {
+          const tx = db.transaction('Groups', 'readonly');
+          const store = tx.objectStore('Groups');
+          const req = store.getAll();
+          req.onsuccess = () => resolve(req.result);
+          req.onerror = () => reject(req.error);
+        });
+        const dms = await new Promise((resolve, reject) => {
+          const tx = db.transaction('DMs', 'readonly');
+          const store = tx.objectStore('DMs');
+          const req = store.getAll();
+          req.onsuccess = () => resolve(req.result);
+          req.onerror = () => reject(req.error);
+        });
+        
+        console.log(`[GM+ Group Mapping] Found ${groups.length} groups in IndexedDB`);
+        
+        groups.forEach(group => {
+          if (group.id && group.name) {
+            mapping.set(group.id, group.name);
+            console.log(`[GM+ Group Mapping] Mapped group ${group.id} -> ${group.name}`);
+          }
+        });
+
+      } else {
+        console.warn('[GM+ Group Mapping] Groups store not found in database');
+      }
+      
+      db.close();
+      
+      console.log(`[GM+ Group Mapping] Built mapping for ${mapping.size} groups`);
+      groupMappingCache = mapping;
+      groupMappingCacheTime = now;
+      return mapping;
+      
+    } catch (error) {
+      console.error('[GM+ Group Mapping] Error building mapping:', error);
+      return new Map();
+    }
+  };
+
+  const findDMButton = (userName) => {
+    console.log(`[GM+ DM Navigation] Looking for DM button for user: ${userName}`);
+    
+    const dmItems = document.querySelectorAll('.list-item');
+    for (const item of dmItems) {
+      const nameSpan = item.querySelector('.chat-name');
+      if (nameSpan && nameSpan.textContent.trim() === userName) {
+        console.log(`[GM+ DM Navigation] Found DM button for ${userName}`);
+        return item.querySelector('a');
+      }
+    }
+    
+    const alternativeSelectors = [
+      `[title="${userName}"]`,
+      `[aria-label*="${userName}"]`,
+      `.chat-name:contains("${userName}")`,
+    ];
+    
+    for (const selector of alternativeSelectors) {
+      try {
+        const element = document.querySelector(selector);
+        if (element) {
+          const dmButton = element.closest('.list-item')?.querySelector('a');
+          if (dmButton) {
+            console.log(`[GM+ DM Navigation] Found DM button via alternative selector for ${userName}`);
+            return dmButton;
+          }
+        }
+      } catch (e) {
+        console.warn(`[GM+ DM Navigation] Error finding DM button with selector "${selector}":`, e);
+      }
+    }
+    
+    console.warn(`[GM+ DM Navigation] Could not find DM button for user: ${userName}`);
+    return null;
+  };
+
+  const findGroupButton = (groupName) => {
+    console.log(`[GM+ Group Navigation] Looking for group button for: ${groupName}`);
+    
+    const groupItems = document.querySelectorAll('.list-item');
+    for (const item of groupItems) {
+      const nameSpan = item.querySelector('.chat-name');
+      if (nameSpan && nameSpan.textContent.trim() === groupName) {
+        console.log(`[GM+ Group Navigation] Found group button for ${groupName}`);
+        return item.querySelector('a');
+      }
+    }
+    
+    const alternativeSelectors = [
+      `[title="${groupName}"]`,
+      `[aria-label*="${groupName}"]`,
+      `.chat-name:contains("${groupName}")`,
+    ];
+    
+    for (const selector of alternativeSelectors) {
+      try {
+        const element = document.querySelector(selector);
+        if (element) {
+          const groupButton = element.closest('.list-item')?.querySelector('a');
+          if (groupButton) {
+            console.log(`[GM+ Group Navigation] Found group button via alternative selector for ${groupName}`);
+            return groupButton;
+          }
+        }
+      } catch (e) {
+        console.warn(`[GM+ Group Navigation] Error finding group button with selector "${selector}":`, e);
+      }
+    }
+    
+    console.warn(`[GM+ Group Navigation] Could not find group button for group: ${groupName}`);
+    return null;
+  };
+
+  const loadMessageContext = async (messageId, groupId, userIdOrConversationId) => {
+    try {
+      console.log(`[GM+ Context] Loading context for message ${messageId}...`, {
+        messageId, groupId, userIdOrConversationId
+      });
+      
+      const cachedMessages = await Cache.all();
+      const targetMessage = cachedMessages.find(m => m.id === messageId);
+      
+      if (!targetMessage) {
+        console.warn('[GM+ Context] Target message not found in cache, proceeding with basic navigation');
+        setTimeout(() => {
+          findAndScrollToMessage(messageId, groupId, userIdOrConversationId);
+        }, 1000);
+        return;
+      }
+      
+      const headers = getAuthHeaders();
+      let contextLoaded = false;
+      
+  console.log('[GM+ Context] Skipping pre-fetch, proceeding to scroll to message');
+      
+      const delay = contextLoaded ? 2000 : 1000;
+      setTimeout(() => {
+        findAndScrollToMessage(messageId, groupId, userIdOrConversationId);
+      }, delay);
+      
+    } catch (error) {
+      console.error('[GM+ Context] Error loading context:', error);
+      setTimeout(() => {
+        findAndScrollToMessage(messageId, groupId, userIdOrConversationId);
+      }, 1000);
+    }
+  };
+
+  const navigateToSearchResult = async (messageId, groupId, otherUserId, conversationId) => {
+    try {
+      console.log(`[GM+ Search Navigation] Navigating to message ${messageId} via Message Viewer`, {
+        groupId, otherUserId, conversationId
+      });
+      
+      // Open the Message Viewer
+      await MessageViewer.show();
+      
+      // Determine the chat ID for the dropdown
+      const chatId = groupId || otherUserId || conversationId;
+      
+      if (!chatId) {
+        throw new Error('No group ID, user ID, or conversation ID provided');
+      }
+      // Select the appropriate chat in the dropdown
+      const chatSelector = document.querySelector('.gm-chat-selector');
+      if (!chatSelector) {
+        throw new Error('Chat selector not found');
+      }
+      // Wait until options are populated
+      await new Promise(resolve => {
+        let attempts = 0;
+        const interval = setInterval(() => {
+          if (chatSelector.options.length > 1 || attempts++ > 20) {
+            clearInterval(interval);
+            resolve();
+          }
+        }, 200);
+      });
+      // Set pending message to jump after messages load
+      MessageViewer.setPendingJumpMessage(messageId);
+      // Set the chat value with correct prefix and trigger change
+      const prefix = groupId ? 'group' : 'dm';
+      chatSelector.value = `${prefix}:${chatId}`;
+      chatSelector.dispatchEvent(new Event('change'));
+      
+    } catch (error) {
+      console.error('[GM+ Search Navigation] Error:', error);
+      Modal.alert('Navigation Error', `Failed to navigate to message: ${error.message}`, 'error');
+    }
+  };
+
+  window.navigateToSearchResult = navigateToSearchResult;
+
+  const handleSearchResultClick = (event) => {
+    const searchResult = event.target.closest('.gm-search-result');
+    if (!searchResult) return;
+    
+    const messageId = searchResult.getAttribute('data-msg-id');
+    const groupId = searchResult.getAttribute('data-group-id');
+    const otherUserId = searchResult.getAttribute('data-other-user-id');
+    const conversationId = searchResult.getAttribute('data-conversation-id');
+    
+    console.log('[GM+ Search Click] Clicked on search result:', {
+      messageId, groupId, otherUserId, conversationId
+    });
+    
+    if (messageId) {
+      navigateToSearchResult(messageId, groupId, otherUserId, conversationId);
+    } else {
+      console.error('[GM+ Search Click] No message ID found in clicked element');
+    }
+  };
 
   window.jumpToMessage = async (messageId, groupId, conversationId) => {
     try {
@@ -940,7 +1249,10 @@
 
   async function findAndScrollToMessage(messageId, groupId, conversationId) {
     try {
-      console.log(`[GM+ Jump] Searching for message ${messageId}...`);
+      console.log(`[GM+ Jump] Searching for message ${messageId}...`, {
+        messageId, groupId, conversationId,
+        conversationIdType: typeof conversationId
+      });
       
       let existingMessage = findMessageInDOM(messageId);
       if (existingMessage) {
@@ -955,6 +1267,8 @@
       const chatType = groupId ? 'groups' : 'chats';
       const chatId = groupId || conversationId;
       
+      console.log(`[GM+ Jump] Using chatId: ${chatId}, chatType: ${chatType}`);
+      
       let beforeId = getCurrentOldestMessageId();
       let attempts = 0;
       const maxAttempts = 250;
@@ -964,20 +1278,73 @@
         console.log(`[GM+ Jump] Loading batch ${attempts}, before_id: ${beforeId}`);
         
         try {
-          const response = await fetch(`/api/${chatType}/${chatId}/messages?acceptFiles=1&before_id=${beforeId}&limit=100`, {
-            method: 'GET',
-            headers: getAuthHeaders(),
-            credentials: 'include'
+          let apiUrl;
+          const authHeaders = getAuthHeaders();
+          
+          console.log(`[GM+ Jump] Auth headers:`, {
+            hasToken: !!authHeaders.token,
+            hasXAccessToken: !!authHeaders['X-Access-Token']
           });
           
+          if (groupId) {
+            apiUrl = `https://api.groupme.com/v3/groups/${chatId}/messages?acceptFiles=1&before_id=${beforeId}&limit=100`;
+          } else {
+            let otherUserId = chatId;
+            
+            console.log(`[GM+ Jump] Processing DM chatId: "${chatId}" (type: ${typeof chatId})`);
+            
+            if (typeof chatId === 'string' && chatId.includes('+')) {
+              const parts = chatId.split('+');
+              console.log(`[GM+ Jump] Conversation ID parts:`, parts);
+              
+              if (parts.length === 2) {
+                const firstId = parts[0];
+                const secondId = parts[1];
+                
+                console.log(`[GM+ Jump] First ID: "${firstId}", Second ID: "${secondId}"`);
+                
+                otherUserId = firstId;
+                console.log(`[GM+ Jump] Using other user ID: "${otherUserId}" (first ID) from conversation ${chatId}`);
+              } else {
+                console.warn(`[GM+ Jump] Unexpected conversation ID format: ${chatId}`);
+              }
+            }
+            
+            console.log(`[GM+ Jump] Final other user ID: "${otherUserId}"`);
+            
+            if (!otherUserId || otherUserId === '') {
+              console.error(`[GM+ Jump] No valid other user ID found! chatId: "${chatId}"`);
+              throw new Error(`No valid other user ID found for DM conversation: ${chatId}`);
+            }
+            
+            apiUrl = `https://api.groupme.com/v3/direct_messages?acceptFiles=1&before_id=${beforeId}&limit=100&other_user_id=${otherUserId}`;
+          }
+          
+          console.log(`[GM+ Jump] Making API call to: ${apiUrl}`);
+          
+          const response = await fetch(apiUrl, { headers: authHeaders, credentials: 'omit' });
+          
+          console.log(`[GM+ Jump] API response status: ${response.status}`);
           if (!response.ok) {
-            throw new Error(`API request failed: ${response.status}`);
+            if (response.status === 404 && !groupId) {
+              console.log('[GM+ Jump] DM not found, trying alternative approach...');
+              break;
+            }
+            const errorText = await response.text().catch(() => 'Unknown error');
+            console.error(`[GM+ Jump] API error response:`, errorText);
+            
+            console.log('[GM+ Jump] API call failed, skipping to DOM search...');
+            break;
           }
           
           const data = await response.json();
-          console.log(`[GM+ Jump] Loaded ${data.response?.messages?.length || 0} messages`);
+          const messages = groupId ? 
+            (data.response?.messages || []) : 
+            (data.response?.direct_messages || []);
           
-          if (!data.response?.messages?.length) {
+          console.log(`[GM+ Jump] Loaded ${messages.length} messages`);
+          
+          if (!messages.length) {
             console.log('[GM+ Jump] No more messages to load');
             break;
           }
@@ -992,7 +1359,6 @@
             return;
           }
           
-          const messages = data.response.messages;
           const oldestMessage = messages[messages.length - 1];
           if (oldestMessage && oldestMessage.id !== beforeId) {
             beforeId = oldestMessage.id;
@@ -1003,14 +1369,39 @@
           
         } catch (error) {
           console.error('[GM+ Jump] Error loading messages:', error);
+          
+          console.log('[GM+ Jump] API failed, checking if message exists in current DOM...');
+          
+          await new Promise(resolve => setTimeout(resolve, 1000));
+          
+          const targetMessage = findMessageInDOM(messageId);
+          if (targetMessage) {
+            console.log('[GM+ Jump] Found target message in DOM after API failure!');
+            targetMessage.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            highlightMessage(targetMessage);
+            return;
+          }
+          
+          console.log('[GM+ Jump] Message not found in current DOM, stopping search');
           break;
         }
       }
       
       if (attempts >= maxAttempts) {
-        Modal.alert('Search Timeout', 'Could not find the message after loading many batches. The message might be very old or deleted.', 'error');
+        console.log('[GM+ Jump] Reached maximum attempts, trying one final DOM search...');
+        
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        const finalMessage = findMessageInDOM(messageId);
+        if (finalMessage) {
+          console.log('[GM+ Jump] Found message in final DOM search!');
+          finalMessage.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          highlightMessage(finalMessage);
+          return;
+        }
+        
+        Modal.alert('Search Timeout', 'Could not find the message after loading many batches. The message might be very old, deleted, or not yet loaded in the chat.', 'error');
       } else {
-        Modal.alert('Message Not Found', 'Could not find the specified message. It may have been deleted or is in a different conversation.', 'error');
+        Modal.alert('Message Not Found', 'Could not find the specified message. It may have been deleted, is in a different conversation, or the API calls are being blocked.', 'error');
       }
       
     } catch (error) {
@@ -1112,15 +1503,54 @@
 
   function highlightMessage(messageElement) {
     const originalStyle = messageElement.style.cssText;
-    messageElement.style.cssText += '; background: rgba(102, 126, 234, 0.3) !important; transition: background 0.3s ease;';
+    
+    const indicator = document.createElement('div');
+    indicator.style.cssText = `
+      position: absolute;
+      top: -8px;
+      right: -8px;
+      background: #667eea;
+      color: white;
+      padding: 2px 6px;
+      border-radius: 10px;
+      font-size: 10px;
+      font-weight: bold;
+      z-index: 1000;
+      animation: fadeInOut 3s ease-in-out;
+    `;
+    indicator.textContent = '🔍 SEARCH RESULT';
+    document.body.appendChild(indicator);
+    if (!document.getElementById('search-highlight-animation')) {
+      const style = document.createElement('style');
+      style.id = 'search-highlight-animation';
+      style.textContent = `
+        @keyframes fadeInOut {
+          0% { opacity: 0; transform: scale(0.8); }
+          20% { opacity: 1; transform: scale(1); }
+          80% { opacity: 1; transform: scale(1); }
+          100% { opacity: 0; transform: scale(0.8); }
+        }
+      `;
+      document.head.appendChild(style);
+    }
+    
+    const originalPosition = messageElement.style.position;
+    messageElement.style.position = 'relative';
+    messageElement.appendChild(indicator);
+    
+    messageElement.style.cssText += '; background: rgba(102, 126, 234, 0.3) !important; transition: background 0.3s ease; border: 2px solid #667eea !important; border-radius: 8px !important;';
     
     setTimeout(() => {
       messageElement.style.cssText = originalStyle;
-    }, 2000);
+      messageElement.style.position = originalPosition;
+      if (indicator.parentNode) {
+        indicator.parentNode.removeChild(indicator);
+      }
+    }, 3000);
   }
 
   const Modal = (() => {
-    let currentModal = null;
+    let modalStack = []; // Stack to track multiple modals
 
     const repositionModal = (modal) => {
       const rect = modal.getBoundingClientRect();
@@ -1145,7 +1575,7 @@
       }
     };
 
-    const setupModalRepositioning = (modal) => {
+    const setupModalRepositioning = (modal, modalInstance) => {
       setTimeout(() => repositionModal(modal), 100);
       
       const observer = new MutationObserver(() => {
@@ -1161,27 +1591,14 @@
         attributeFilter: ['style', 'class']
       });
       
-      const originalClose = currentModal?.close;
-      if (originalClose) {
-        currentModal.close = () => {
-          observer.disconnect();
-          originalClose();
-        };
-      }
-      
       const handleResize = () => repositionModal(modal);
       window.addEventListener('resize', handleResize);
       
-      setTimeout(() => {
-        if (currentModal?.close) {
-          const originalClose = currentModal.close;
-          currentModal.close = () => {
-            window.removeEventListener('resize', handleResize);
-            observer.disconnect();
-            originalClose();
-          };
-        }
-      }, 50);
+      // Store cleanup functions in modal instance
+      modalInstance.cleanup = () => {
+        window.removeEventListener('resize', handleResize);
+        observer.disconnect();
+      };
     };
 
     const create = () => {
@@ -1200,7 +1617,6 @@
       const closeBtn = document.createElement('button');
       closeBtn.className = 'gm-modal-close';
       closeBtn.innerHTML = '×';
-      closeBtn.onclick = () => close();
       
       const body = document.createElement('div');
       body.className = 'gm-modal-body';
@@ -1212,43 +1628,93 @@
       modal.append(header, body, footer);
       overlay.appendChild(modal);
       
+      const modalInstance = {
+        overlay,
+        modal,
+        header,
+        title,
+        closeBtn,
+        body,
+        footer,
+        cleanup: null,
+        close: null
+      };
+      
+      // Set up close functionality
+      const closeModal = () => {
+        // Remove from stack
+        const index = modalStack.indexOf(modalInstance);
+        if (index > -1) {
+          modalStack.splice(index, 1);
+        }
+        
+        // Clean up observers and event listeners
+        if (modalInstance.cleanup) {
+          modalInstance.cleanup();
+        }
+        
+        overlay.classList.remove('show');
+        setTimeout(() => {
+          if (overlay.parentNode) {
+            overlay.parentNode.removeChild(overlay);
+          }
+        }, 200);
+      };
+      
+      modalInstance.close = closeModal;
+      closeBtn.onclick = closeModal;
+      
       overlay.onclick = (e) => {
-        if (e.target === overlay) close();
+        if (e.target === overlay) closeModal();
       };
       
       const handleEscape = (e) => {
-        if (e.key === 'Escape') close();
+        if (e.key === 'Escape') {
+          // Only close the topmost modal
+          if (modalStack.length > 0 && modalStack[modalStack.length - 1] === modalInstance) {
+            closeModal();
+          }
+        }
       };
       
       const show = () => {
+        // Add to stack
+        modalStack.push(modalInstance);
+        
         document.body.appendChild(overlay);
         document.addEventListener('keydown', handleEscape);
         overlay.offsetHeight;
         setTimeout(() => {
           overlay.classList.add('show');
-          // Set up modal repositioning observer
-          setupModalRepositioning(modal);
+          setupModalRepositioning(modal, modalInstance);
         }, 10);
-        currentModal = { 
-          overlay, 
-          modal,
-          close: () => {
-            document.removeEventListener('keydown', handleEscape);
-            overlay.classList.remove('show');
-            setTimeout(() => {
-              if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
-            }, 200);
-            currentModal = null;
-          }
-        };
       };
       
-      return { overlay, modal, header, title, closeBtn, body, footer, show };
+      modalInstance.show = show;
+      
+      // Clean up event listener when modal is closed
+      const originalClose = modalInstance.close;
+      modalInstance.close = () => {
+        document.removeEventListener('keydown', handleEscape);
+        originalClose();
+      };
+      
+      return modalInstance;
     };
 
     const close = () => {
-      if (currentModal) {
-        currentModal.close();
+      // Close the topmost modal
+      if (modalStack.length > 0) {
+        const topModal = modalStack[modalStack.length - 1];
+        topModal.close();
+      }
+    };
+
+    const closeAll = () => {
+      // Close all modals
+      while (modalStack.length > 0) {
+        const modal = modalStack[modalStack.length - 1];
+        modal.close();
       }
     };
 
@@ -1334,7 +1800,7 @@
       const { title, body, footer, show } = create();
       
       title.textContent = titleText;
-      body.innerHTML = content; // Direct content without wrapper
+      body.innerHTML = content;
       
       const okBtn = document.createElement('button');
       okBtn.className = 'gm-modal-btn primary';
@@ -1347,7 +1813,566 @@
       setTimeout(() => okBtn.focus(), 100);
     };
 
-    return { alert, confirm, stats, analytics, close };
+    const viewer = (titleText, content) => {
+      const { title, body, show } = create();
+      
+      title.textContent = titleText;
+      body.innerHTML = content;
+      
+      show();
+      
+      return { title, body };
+    };
+
+    return { alert, confirm, stats, analytics, viewer, close, closeAll, create };
+  })();
+
+  // message viewer module
+  const MessageViewer = (() => {
+    let currentChat = null;
+    let allMessages = [];
+    let visibleMessages = [];
+    let currentModal = null;
+    // Message ID pending navigation after chat load
+    let pendingJumpMessageId = null;
+    
+    const ITEM_HEIGHT = 120;
+    const BUFFER_SIZE = 10;
+    
+    const formatTimestamp = (timestamp) => {
+      const date = new Date(timestamp * 1000);
+      return date.toLocaleTimeString('en-US', { 
+        hour: 'numeric', 
+        minute: '2-digit',
+        hour12: true 
+      });
+    };
+    
+    const formatDate = (timestamp) => {
+      const date = new Date(timestamp * 1000);
+      return date.toLocaleDateString('en-US', { 
+        month: 'short', 
+        day: 'numeric',
+        year: 'numeric' 
+      });
+    };
+    
+    const sanitizeText = (text) => {
+      if (!text) return '';
+      return text.replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    };
+    
+    // Utility function to scroll to a specific message
+    const scrollToMessage = (messageId) => {
+      const messageElement = document.getElementById(`gm-msg-${messageId}`);
+      if (messageElement) {
+        messageElement.scrollIntoView({ 
+          behavior: 'smooth', 
+          block: 'center' 
+        });
+        
+        // Highlight the message for visibility
+        messageElement.style.backgroundColor = 'rgba(26, 188, 156, 0.3)';
+        setTimeout(() => {
+          messageElement.style.transition = 'background-color 1s ease';
+          messageElement.style.backgroundColor = '';
+        }, 4000);
+        
+        return true;
+      }
+      return false;
+    };
+    
+    const navigateToMessage = (messageId) => {
+      if (scrollToMessage(messageId)) {
+        return;
+      }
+      
+      // If not visible, we need to find the message and potentially load more messages
+      const messageIndex = allMessages.findIndex(msg => msg.id === messageId);
+      if (messageIndex !== -1) {
+        // Force render the message by simulating scroll to that position
+        const container = currentModal?.modal.querySelector('.gm-message-viewer-container');
+        if (container) {
+          const scrollTop = messageIndex * ITEM_HEIGHT;
+          container.scrollTop = scrollTop;
+          
+          // Wait for render, then try to scroll to the specific message
+          setTimeout(() => {
+            scrollToMessage(messageId);
+          }, 100);
+        }
+      }
+    };
+    
+    const renderReactions = (reactions) => {
+      if (!reactions || !reactions.length) return '';
+      
+      const reactionCounts = {};
+      reactions.forEach(reaction => {
+        let emoji;
+        if (reaction.type === 'unicode' && reaction.code) {
+          // Use the actual Unicode emoji for unicode type
+          emoji = reaction.code;
+        } else {
+          // For 'emoji' type or missing type, use generic heart since custom emojis are complex
+          emoji = '❤️';
+        }
+        
+        if (reactionCounts[emoji]) {
+          reactionCounts[emoji].count += reaction.user_ids ? reaction.user_ids.length : 1;
+        } else {
+          reactionCounts[emoji] = {
+            count: reaction.user_ids ? reaction.user_ids.length : 1,
+            type: reaction.type || 'emoji'
+          };
+        }
+      });
+      
+      return Object.entries(reactionCounts).map(([emoji, data]) => 
+        `<div class="gm-message-reaction" title="Reaction: ${emoji} (${data.type})">
+          <span class="gm-message-reaction-emoji">${emoji}</span>
+          <span>${data.count}</span>
+        </div>`
+      ).join('');
+    };
+    
+    const renderAttachments = (attachments) => {
+      if (!attachments || !attachments.length) return '';
+      
+      return attachments.map(att => {
+        let content = '';
+        let isClickable = false;
+        let url = '';
+        
+        switch (att.type) {
+          case 'image':
+            content = `📷 Image${att.name ? `: ${att.name}` : ''}`;
+            isClickable = !!(att.url || att.preview_url);
+            url = att.url || att.preview_url;
+            break;
+          case 'video':
+            content = `🎥 Video${att.name ? `: ${att.name}` : ''}`;
+            isClickable = !!(att.url || att.video_url);
+            url = att.url || att.video_url;
+            break;
+          case 'file':
+            content = `📎 File${att.name ? `: ${att.name}` : ''}`;
+            isClickable = !!att.url;
+            url = att.url;
+            break;
+          case 'location':
+            content = `📍 Location${att.name ? `: ${att.name}` : ''}`;
+            if (att.lat && att.lng) {
+              isClickable = true;
+              url = `https://www.google.com/maps?q=${att.lat},${att.lng}`;
+            }
+            break;
+          case 'reply':
+            // Handle reply attachments specially - these should navigate to the replied message
+            const replyText = att.text || att.reply_text || 'Reply';
+            const repliedMessageId = att.reply_id || att.base_reply_id;
+            content = `💬 Reply: ${replyText.length > 50 ? replyText.substring(0, 50) + '...' : replyText}`;
+            if (repliedMessageId) {
+              return `<div class="gm-message-attachment gm-message-reply-attachment" data-reply-id="${repliedMessageId}" style="cursor:pointer;border-left:3px solid #667eea;padding-left:8px;">${content}</div>`;
+            }
+            break;
+          default:
+            content = `📎 ${att.type || 'Attachment'}${att.name ? `: ${att.name}` : ''}`;
+            isClickable = !!att.url;
+            url = att.url;
+        }
+        
+        if (isClickable && url) {
+          return `<div class="gm-message-attachment gm-message-attachment-clickable" data-url="${url}" style="cursor:pointer;text-decoration:underline;">${content}</div>`;
+        } else {
+          return `<div class="gm-message-attachment">${content}</div>`;
+        }
+      }).join('');
+    };
+    
+    const renderMessage = (message, index) => {
+      const isDeleted = message.text === 'This message was deleted' || message.deleted_at;
+      const isSystem = message.system || message.message_type === 'system';
+      const isCurrentUser = message.user_id === getCurrentUserId(); // not yet implemented
+      const timestamp = formatTimestamp(message.created_at);
+      const reactions = renderReactions(message.reactions);
+      const attachments = renderAttachments(message.attachments);
+      
+      // Create unique ID for this message item
+      const messageElementId = `gm-msg-${message.id}`;
+      
+      if (isSystem) {
+        return `
+          <div class="gm-message-item gm-message-system" id="${messageElementId}" data-message-id="${message.id}" data-index="${index}">
+            ${sanitizeText(message.text || message.event || 'System message')}
+            <div class="gm-message-timestamp">${timestamp}</div>
+          </div>
+        `;
+      }
+      
+      return `
+        <div class="gm-message-item ${isDeleted ? 'deleted' : ''}" id="${messageElementId}" data-message-id="${message.id}" data-index="${index}">
+          ${isCurrentUser ? '<div class="gm-message-pill"></div>' : ''}
+          <div class="gm-message-header">
+            <div class="gm-message-avatar">
+              ${message.avatar_url ? `<img src="${message.avatar_url}" alt="Avatar">` : ''}
+            </div>
+            <div class="gm-message-nickname">${sanitizeText(message.name || 'Unknown User')}</div>
+          </div>
+          <div class="gm-message-timestamp">${timestamp}</div>
+          <div class="gm-message-body">
+            <div class="gm-message-text ${isDeleted ? 'deleted' : ''}">
+              ${sanitizeText(message.text || '')}
+            </div>
+            ${message.updated_at && message.updated_at !== message.created_at ? 
+              '<div class="gm-message-edited">(edited)</div>' : ''}
+            ${attachments}
+            ${reactions ? `<div class="gm-message-reactions">${reactions}</div>` : ''}
+          </div>
+        </div>
+      `;
+    };
+    
+    const getCurrentUserId = () => {
+      try {
+        const appData = localStorage.getItem('app');
+        if (appData) {
+          const parsed = JSON.parse(appData);
+          return parsed?.user?.id || parsed?.user_id;
+        }
+      } catch (e) {}
+      return null;
+    };
+    
+    const updateVirtualScroll = (container) => {
+      const viewport = container.querySelector('.gm-messages-viewport');
+      const scrollTop = viewport.scrollTop;
+      const viewportHeight = viewport.clientHeight;
+      
+      const itemsPerPage = Math.ceil(viewportHeight / ITEM_HEIGHT);
+      const startIndex = Math.max(0, Math.floor(scrollTop / ITEM_HEIGHT) - BUFFER_SIZE);
+      const endIndex = Math.min(
+        startIndex + itemsPerPage + (BUFFER_SIZE * 2),
+        allMessages.length
+      );
+      
+      visibleMessages = allMessages.slice(startIndex, endIndex);
+      
+      const messagesHtml = visibleMessages.map((msg, i) => 
+        renderMessage(msg, startIndex + i)
+      ).join('');
+      
+      const totalHeight = allMessages.length * ITEM_HEIGHT;
+      const offsetY = startIndex * ITEM_HEIGHT;
+      
+      viewport.innerHTML = `
+        <div style="height: ${totalHeight}px; position: relative;">
+          <div style="transform: translateY(${offsetY}px); min-height: ${ITEM_HEIGHT * visibleMessages.length}px;">
+            ${messagesHtml}
+          </div>
+        </div>
+      `;
+      
+      // add click handlers for message details
+      viewport.querySelectorAll('.gm-message-item').forEach(item => {
+        item.addEventListener('click', (e) => {
+          // Handle attachment clicks (open in new tab)
+          if (e.target.classList.contains('gm-message-attachment-clickable')) {
+            e.stopPropagation();
+            const url = e.target.getAttribute('data-url');
+            if (url) {
+              window.open(url, '_blank');
+            }
+            return;
+          }
+          
+          // Handle reply attachment clicks (navigate to message)
+          const replyElem = e.target.closest('.gm-message-reply-attachment');
+          if (replyElem && replyElem.hasAttribute('data-reply-id')) {
+            e.stopPropagation();
+            const replyId = replyElem.getAttribute('data-reply-id');
+            if (replyId) {
+              navigateToMessage(replyId);
+            }
+            return;
+          }
+          
+          // Don't show details if clicking on reactions
+          if (e.target.closest('.gm-message-reaction')) return;
+          
+          // Show message details
+          const messageId = item.getAttribute('data-message-id');
+          const message = allMessages.find(m => m.id === messageId);
+          if (message) showMessageDetails(message);
+        });
+      });
+    };
+    
+    const showMessageDetails = (message) => {
+      const details = {
+        'ID': message.id,
+        'Name': message.name,
+        'Message': message.text,
+        'Timestamp': new Date(message.created_at * 1000).toISOString(),
+        'Group ID': message.group_id,
+        'User ID': message.user_id,
+        'Sender Type': message.sender_type,
+        'System': message.system ? 'Yes' : 'No',
+        'Message Type': message.message_type,
+        'Likes Count': message.likes_count || message.favorited_by?.length || 0,
+        'Reactions': message.reactions ? JSON.stringify(message.reactions, null, 2) : 'None',
+        'Pinned At': message.pinned_at ? new Date(message.pinned_at * 1000).toISOString() : 'Not pinned',
+        'Pinned By': message.pinned_by || 'N/A',
+        'Platform': message.platform,
+        'Avatar URL': message.avatar_url,
+        'Updated At': message.updated_at ? new Date(message.updated_at * 1000).toISOString() : 'Never',
+        'Source GUID': message.source_guid,
+        'Attachments': message.attachments ? JSON.stringify(message.attachments, null, 2) : 'None'
+      };
+      
+      const content = Object.entries(details)
+        .map(([key, value]) => `${key}: ${value || 'N/A'}`)
+        .join('\n');
+      
+      const detailsModalInstance = Modal.create();
+      const { modal, title, body, show } = detailsModalInstance;
+      modal.className = 'gm-modal gm-message-details-modal';
+      title.textContent = `Message Details - ${message.name}`;
+      body.innerHTML = `<div class="gm-message-details-content"><pre style="background-color: #333333">${content}</pre></div>`;
+      show();
+    };
+    
+    const loadChatMessages = async (chatId, chatType) => {
+      const container = currentModal.modal.querySelector('.gm-messages-container');
+      const viewport = container.querySelector('.gm-messages-viewport');
+      const messageCount = currentModal.modal.querySelector('.gm-message-count');
+      
+      viewport.innerHTML = '<div class="gm-loading-spinner">Loading messages...</div>';
+      
+      try {
+        if (chatType === 'group') {
+          allMessages = await Cache.getByGroup(chatId);
+        } else {
+          const allCached = await Cache.all();
+          allMessages = allCached.filter(msg => {
+            return (msg.is_dm || msg.conversation_id) && (
+              msg.user_id === chatId || 
+              msg.sender_id === chatId ||
+              msg.dm_other_user_id === chatId ||
+              (msg.conversation_id && msg.conversation_id.includes(chatId))
+            );
+          });
+        }
+        
+        // sort by timestamp (newest first)
+        allMessages.sort((a, b) => b.created_at - a.created_at);
+        
+        messageCount.textContent = `${allMessages.length.toLocaleString()} messages`;
+        
+        if (allMessages.length === 0) {
+          viewport.innerHTML = '<div class="gm-no-messages">No messages found in cache</div>';
+          return;
+        }
+        
+        const currentFont = localStorage.getItem('gm-selected-font') || 'Poppins';
+        viewport.style.fontFamily = FONT_MAP[currentFont] || currentFont;
+        
+        updateVirtualScroll(container);
+        
+        viewport.addEventListener('scroll', () => updateVirtualScroll(container));
+        
+      } catch (error) {
+        console.error('[GM+ Message Viewer] Error loading messages:', error);
+        viewport.innerHTML = '<div class="gm-no-messages">Error loading messages</div>';
+      }
+    };
+    
+    const populateChatSelector = async (selector) => {
+      try {
+        while (selector.children.length > 1) {
+          selector.removeChild(selector.lastChild);
+        }
+        
+        // First, get existing mappings quickly
+        const [groupMapping, userMapping] = await Promise.all([
+          getGroupMapping(),
+          getUserMapping()
+        ]);
+        
+        // Get cached messages to find which chats have activity
+        const cachedMessages = await Cache.all();
+        const groups = new Map();
+        const dms = new Map();
+        
+        // Build chat lists from cached messages
+        cachedMessages.forEach(msg => {
+          if (msg.group_id) {
+            if (!groups.has(msg.group_id)) {
+              // Use real group name if available, otherwise fall back to generic name
+              const groupName = groupMapping.get(msg.group_id) || msg.group_name || `Group ${msg.group_id}`;
+              groups.set(msg.group_id, {
+                id: msg.group_id,
+                name: groupName,
+                type: 'group',
+                lastMessage: msg.created_at
+              });
+            } else {
+              const existing = groups.get(msg.group_id);
+              if (msg.created_at > existing.lastMessage) {
+                existing.lastMessage = msg.created_at;
+              }
+              // Update name if we find a better one
+              if (msg.group_name && !existing.name.startsWith('Group ')) {
+                existing.name = msg.group_name;
+              }
+            }
+          } else if (msg.is_dm || msg.conversation_id) {
+            const dmId = msg.dm_other_user_id || msg.user_id || msg.sender_id;
+            if (dmId && !dms.has(dmId)) {
+              // Use real user name if available, otherwise fall back to message name or generic name
+              const userName = userMapping.get(dmId) || msg.name || `User ${dmId}`;
+              dms.set(dmId, {
+                id: dmId,
+                name: userName,
+                type: 'dm',
+                lastMessage: msg.created_at
+              });
+            } else if (dmId) {
+              const existing = dms.get(dmId);
+              if (msg.created_at > existing.lastMessage) {
+                existing.lastMessage = msg.created_at;
+              }
+              // Update name if we have a better one
+              const betterName = userMapping.get(dmId);
+              if (betterName && existing.name.startsWith('User ')) {
+                existing.name = betterName;
+              }
+            }
+          }
+        });
+        
+        // Add any additional groups/users from mappings that might not have cached messages
+        groupMapping.forEach((name, id) => {
+          if (!groups.has(id)) {
+            groups.set(id, {
+              id: id,
+              name: name,
+              type: 'group',
+              lastMessage: 0 // No messages cached
+            });
+          }
+        });
+        
+        userMapping.forEach((name, id) => {
+          if (!dms.has(id)) {
+            dms.set(id, {
+              id: id,
+              name: name,
+              type: 'dm',
+              lastMessage: 0 // No messages cached
+            });
+          }
+        });
+        
+        // Sort by last message time (most recent first)
+        const sortedGroups = Array.from(groups.values()).sort((a, b) => b.lastMessage - a.lastMessage);
+        const sortedDMs = Array.from(dms.values()).sort((a, b) => b.lastMessage - a.lastMessage);
+        
+        // Add groups to selector
+        sortedGroups.forEach(group => {
+          const option = document.createElement('option');
+          option.value = `group:${group.id}`;
+          option.textContent = group.name;
+          selector.appendChild(option);
+        });
+        
+        // Add DMs to selector
+        sortedDMs.forEach(dm => {
+          const option = document.createElement('option');
+          option.value = `dm:${dm.id}`;
+          option.textContent = `${dm.name} (DM)`;
+          selector.appendChild(option);
+        });
+        
+        console.log(`[GM+ Message Viewer] Populated selector with ${sortedGroups.length} groups and ${sortedDMs.length} DMs`);
+        
+      } catch (error) {
+        console.error('[GM+ Message Viewer] Error populating chat selector:', error);
+      }
+    };
+    
+    const show = async () => {
+      if (!Cache) {
+        Modal.alert('Cache Not Available', 'Message cache is not available. Make sure the extension is properly loaded.', 'error');
+        return;
+      }
+      
+      const modalInstance = Modal.create();
+      const { modal, title, body, show: showModal } = modalInstance;
+      modal.className = 'gm-modal gm-message-viewer-modal';
+      modal.style.pointerEvents = 'auto';
+      
+      // Store the modal instance properly
+      currentModal = modalInstance;
+      
+      title.textContent = 'Message Viewer';
+      
+      body.innerHTML = `
+        <div class="gm-message-viewer-header">
+          <select class="gm-chat-selector">
+            <option value="">Loading chats...</option>
+          </select>
+          <div class="gm-message-count">0 messages</div>
+        </div>
+        <div class="gm-messages-container">
+          <div class="gm-messages-viewport" style="height: 95vh; overflow-y: auto; position: relative;">
+            <div class="gm-no-messages">Select a chat to view messages</div>
+          </div>
+        </div>
+      `;
+      
+      body.style.width = '95vw';
+      body.style.maxWidth = '2000px';
+      body.style.height = '80vh';
+      body.style.maxHeight = '1600px';
+      body.style.overflow = 'hidden';
+      body.style.margin = '0';
+      body.style.padding = '20px';
+      body.style.boxSizing = 'border-box';
+      
+      const chatSelector = body.querySelector('.gm-chat-selector');
+      
+      showModal();
+      
+      setTimeout(async () => {
+        try {
+          await populateChatSelector(chatSelector);
+          chatSelector.querySelector('option').textContent = 'Select a chat...';
+        } catch (error) {
+          console.error('[GM+ Message Viewer] Error populating selector:', error);
+          chatSelector.innerHTML = '<option value="">Error loading chats</option>';
+        }
+      }, 10);
+      
+      chatSelector.addEventListener('change', async (e) => {
+        const value = e.target.value;
+        if (!value) return;
+        const [type, id] = value.split(':');
+        currentChat = { type, id };
+        await loadChatMessages(id, type);
+        if (pendingJumpMessageId) {
+          MessageViewer.navigateToMessage(pendingJumpMessageId);
+          pendingJumpMessageId = null;
+        }
+      });
+    };
+    
+    const setPendingJumpMessage = (messageId) => {
+      pendingJumpMessageId = messageId;
+    };
+
+    return { show, navigateToMessage, setPendingJumpMessage };
   })();
 
   const FONT_FAMILIES = [
@@ -1430,7 +2455,7 @@
     font: `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-type-icon lucide-type"><path d="M12 4v16"/><path d="M4 7V5a1 1 0 0 1 1-1h14a1 1 0 0 1 1 1v2"/><path d="M9 20h6"/></svg>`,
     save: `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-save-icon lucide-save"><path d="M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M17 21v-7a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v7"/><path d="M7 3v4a1 1 0 0 0 1 1h7"/></svg>`,
     bars: `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-hash-icon lucide-hash"><line x1="4" x2="20" y1="9" y2="9"/><line x1="4" x2="20" y1="15" y2="15"/><line x1="10" x2="8" y1="3" y2="21"/><line x1="16" x2="14" y1="3" y2="21"/></svg>`,
-    // Quick Jump SVG removed
+    eye: `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-eye-icon lucide-eye"><path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0"/><circle cx="12" cy="12" r="3"/></svg>`
   };
   let sidebar, panes = [];
 
@@ -1485,6 +2510,42 @@
       .gm-cache-pane input[type="checkbox"]{accent-color:#667eea;margin:0;width:14px;height:14px}
       .gm-cache-pane label{user-select:none}
       .gm-cache-pane label:hover{color:#fff}
+      
+      /* Message Viewer Modal Styles */
+      .gm-message-viewer-modal{max-width:95vw;width:2000px;max-height:95vh;height:1400px}
+      .gm-message-viewer-header{padding:16px 20px;border-bottom:1px solid #333;display:flex;align-items:center;gap:12px}
+      .gm-chat-selector{background:#2a2a2a;color:#fff;border:1px solid #444;border-radius:4px;padding:8px 12px;flex:1;font-size:14px}
+      .gm-chat-selector option{background:#2a2a2a;color:#fff}
+      .gm-message-count{color:#888;font-size:12px;white-space:nowrap}
+      .gm-messages-container{height:calc(100% - 120px);background:#292929;position:relative;overflow:hidden}
+      .gm-messages-viewport{height:100%;overflow-y:auto;padding:0 20px}
+      .gm-message-item{position:relative;border-bottom:1px solid rgba(0,0,0,0);padding:12px 0;transition:opacity 0.25s ease;color:#fff;font-size:14px;line-height:20px}
+      .gm-message-item:hover{background:rgba(255,255,255,0.02)}
+      .gm-message-item.deleted{opacity:0.5}
+      .gm-message-header{display:flex;align-items:center;gap:12px;margin-bottom:8px}
+      .gm-message-avatar{width:32px;height:32px;border-radius:50%;background:#444;flex-shrink:0;overflow:hidden}
+      .gm-message-avatar img{width:100%;height:100%;object-fit:cover}
+      .gm-message-nickname{font-weight:500;color:#fff}
+      .gm-message-timestamp{position:absolute;right:0;top:12px;color:#888;font-size:11px;opacity:0;transition:opacity 0.2s ease}
+      .gm-message-item:hover .gm-message-timestamp{opacity:1}
+      .gm-message-body{margin-left:44px}
+      .gm-message-text{margin-bottom:4px;word-wrap:break-word}
+      .gm-message-text.deleted{font-style:italic;color:#888}
+      .gm-message-attachments{margin-top:8px}
+      .gm-message-attachment{background:#333;border-radius:4px;padding:8px;margin-bottom:4px;font-size:12px;color:#ccc}
+      .gm-message-reactions{margin-top:8px;display:flex;gap:4px;flex-wrap:wrap}
+      .gm-message-reaction{background:#444;border-radius:12px;padding:2px 6px;font-size:11px;color:#ddd;display:flex;align-items:center;gap:2px}
+  .gm-message-reaction-emoji{width:14px;height:14px;display:inline-block;vertical-align:middle;font-size:14px;line-height:14px}
+      .gm-message-pill{position:absolute;left:-8px;top:50%;transform:translateY(-50%);width:4px;height:20px;background:#667eea;border-radius:2px}
+      .gm-message-edited{color:#888;font-size:11px;font-style:italic}
+      .gm-message-reply{border-left:3px solid #667eea;background:#333;border-radius:0 4px 4px 0;padding:8px 12px;margin-bottom:8px;font-size:12px}
+      .gm-message-reply-name{font-weight:500;color:#667eea;margin-bottom:2px}
+      .gm-message-reply-text{color:#ccc;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+      .gm-message-system{text-align:center;color:#888;font-style:italic;background:#1a1a1a;border-radius:4px;padding:8px;margin:4px 0}
+      .gm-message-details-modal{max-width:600px;width:90vw}
+      .gm-message-details-content{font-family:ui-monospace,SFMono-Regular,'SF Mono',monospace;font-size:12px;background:#0f0f0f;padding:16px;border-radius:6px;white-space:pre-wrap;max-height:60vh;overflow-y:auto}
+      .gm-loading-spinner{display:flex;align-items:center;justify-content:center;height:200px;color:#888}
+      .gm-no-messages{display:flex;align-items:center;justify-content:center;height:200px;color:#888;font-style:italic}
     `;
     const s = document.createElement('style');
     s.id = 'gm-sidebar-styles';
@@ -1735,9 +2796,8 @@
           console.log(`[GM+ Search] To date: ${dateToInput.value} -> ${toDate.toLocaleString()} -> ${options.dateTo}`);
         }
         
-        // If we have date filters, increase the limit since we're filtering a lot
         if (options.dateFrom || options.dateTo) {
-          options.limit = 5000; // Much higher limit for date-based searches
+          options.limit = 5000;
         }
         
         if (attachmentsCheck.checked) {
@@ -1747,7 +2807,6 @@
         let results = await Cache.search(q, options);
         console.log(`[GM+ Search] Search completed. Query: "${q}", Options:`, options, `Results: ${results.length}`);
         
-        // Log first few results to see what we got
         if (results.length > 0) {
           console.log(`[GM+ Search] First few results:`, results.slice(0, 5).map(msg => ({
             name: msg.name,
@@ -1802,8 +2861,20 @@
             const textContent = msg.text || (msg.system ? '[System Message]' : '[No text content]');
             const truncatedText = textContent.length > 150 ? textContent.substring(0, 150) + '...' : textContent;
             
+            // Determine navigation parameters
+            const groupId = msg.group_id || '';
+            const otherUserId = msg.dm_other_user_id || (msg.is_dm ? msg.user_id : '') || '';
+            const conversationId = msg.conversation_id || '';
+            
             return `
-              <div style="background:#222;margin:4px 0;padding:8px;border-radius:4px;border-left:3px solid #667eea;" data-msg-id="${msg.id}">
+              <div class="gm-search-result" style="background:#222;margin:4px 0;padding:8px;border-radius:4px;border-left:3px solid #667eea;cursor:pointer;transition:background-color 0.2s;" 
+                   data-msg-id="${msg.id}"
+                   data-group-id="${groupId}"
+                   data-other-user-id="${otherUserId}"
+                   data-conversation-id="${conversationId}"
+                   onmouseover="this.style.backgroundColor='#333'"
+                   onmouseout="this.style.backgroundColor='#222'"
+                   title="Click to navigate to this message">
                 <div style="font-size:12px;color:#888;margin-bottom:4px;display:flex;justify-content:space-between;">
                   <span>${msg.name || 'Unknown'} • ${dateStr}</span>
                   <span style="color:#667eea;">#${index + 1}</span>
@@ -1811,7 +2882,9 @@
                 <div style="font-size:14px;color:#ddd;margin-bottom:4px;">${truncatedText}</div>
                 ${attachmentInfo}
                 ${msg.group_id ? `<div style="font-size:10px;color:#666;">Group: ${msg.group_id}</div>` : ''}
+                ${msg.is_dm ? `<div style="font-size:10px;color:#666;">💬 Direct Message</div>` : ''}
                 ${msg.likes_count ? `<div style="font-size:10px;color:#666;">❤️ ${msg.likes_count} likes</div>` : ''}
+                <div style="font-size:10px;color:#555;margin-top:4px;">🔗 Click to navigate</div>
               </div>
             `;
           }).join('');
@@ -1820,14 +2893,20 @@
             <div style="background:#333;padding:8px;margin-bottom:8px;border-radius:4px;">
               <strong style="color:#fff;">Search Results: ${results.length} messages found</strong>
               ${results.length > 100 ? '<div style="color:#888;font-size:12px;">Showing first 100 results</div>' : ''}
+              <div style="color:#667eea;font-size:12px;margin-top:4px;">💡 Click any result to navigate to that message</div>
             </div>
           `;
           
           searchResults.innerHTML = summary + resultsHtml;
+          
+          // Add event delegation for search result clicks
+          searchResults.removeEventListener('click', handleSearchResultClick); // Remove any existing listener
+          searchResults.addEventListener('click', handleSearchResultClick);
+          
           exportResultsBtn.disabled = false;
         }
   searchResults.style.display = 'block';
-  // re-open the stats pane to recalculate position
+  // re-open the stats pane to recalculate position, hacky fix
   open(2);
   pane.scrollTop = pane.scrollHeight;
       } catch (error) {
@@ -1866,7 +2945,6 @@
           msg.attachments?.length > 0 ? 'Yes' : 'No',
           msg.system ? 'System' : (msg.event ? 'Event' : 'User')
         ].join(','));
-        
         const csv = [csvHeaders.join(','), ...csvRows].join('\r\n');
         const blob = new Blob([csv], { type: 'text/csv' });
         const a = document.createElement('a');
@@ -2226,7 +3304,7 @@
           }
         };
         
-        // Calculate user statistics and time patterns
+        // user statistics and time patterns
         messages.forEach(msg => {
           if (!msg.system && msg.name) {
             if (!analytics.user_stats[msg.name]) {
@@ -2581,7 +3659,7 @@
     
     const activityIndicator = document.createElement('div');
     activityIndicator.style.cssText = 'background:#1a1a1a;border:1px solid #333;border-radius:4px;padding:8px;margin-bottom:8px;';
-    activityIndicator.innerHTML = '<div style="font-size:12px;color:#888;">📡 Monitoring for new messages...</div>';
+    activityIndicator.innerHTML = '<div style="font-size:12px;color:#888;">Monitoring for new messages...</div>';
     
     const toggleMonitorBtn = document.createElement('button');
     toggleMonitorBtn.textContent = 'Auto-Cache: ON';
@@ -2598,7 +3676,7 @@
       toggleMonitorBtn.style.background = isMonitoring ? '#28a745' : '#6c757d';
       
       if (isMonitoring) {
-        activityIndicator.innerHTML = '<div style="font-size:12px;color:#888;">📡 Monitoring resumed...</div>';
+        activityIndicator.innerHTML = '<div style="font-size:12px;color:#888;">▶️ Monitoring resumed...</div>';
       } else {
         activityIndicator.innerHTML = '<div style="font-size:12px;color:#f57c00;">⏸️ Monitoring paused</div>';
       }
@@ -2637,56 +3715,38 @@
 
     convSelect.addEventListener('change', () => {
       fetchBtn.textContent = 'Smart Fetch Messages';
-    });    (async () => {
-      const headers = getAuthHeaders();
+    });
+    
+    // Populate dropdown with groups and DMs from IndexedDB
+    (async () => {
       try {
-        const gResp = await fetch('https://api.groupme.com/v3/groups', { headers, credentials: 'omit' });
-        if (gResp.ok) {
-          const gd = await gResp.json();
-          (gd.response || []).forEach(g => {
-            const opt = document.createElement('option');
-            opt.value = `group:${g.id}`;
-            opt.textContent = g.name;
-            convSelect.appendChild(opt);
-          });
-        }
-      } catch (e) { console.warn('Bulk Fetch: failed to load groups', e); }
-      try {
-        const dResp = await fetch('https://api.groupme.com/v3/chats', { headers, credentials: 'omit' });
-        if (dResp.ok) {
-          const dd = await dResp.json();
-          console.log('[GM+ Bulk Fetch] DM conversations response:', dd);
-          (dd.response || []).forEach(dm => {
-            const opt = document.createElement('option');
-            opt.value = `dm:${dm.other_user.id}`;
-            opt.textContent = `${dm.other_user.name} (DM)`;
-            convSelect.appendChild(opt);
-          });
-        } else {
-          console.warn('[GM+ Bulk Fetch] Chats API failed, trying direct_messages fallback');
-          // Fallback to direct_messages endpoint if chats fails
-          const fallbackResp = await fetch('https://api.groupme.com/v3/direct_messages?acceptFiles=1&limit=100', { headers, credentials: 'omit' });
-          if (fallbackResp.ok) {
-            const fallbackData = await fallbackResp.json();
-            console.log('[GM+ Bulk Fetch] Direct messages fallback response:', fallbackData);
-            // Extract unique users from direct messages
-            const users = new Map();
-            (fallbackData.response || []).forEach(msg => {
-              if (msg.user_id && msg.name && !users.has(msg.user_id)) {
-                users.set(msg.user_id, msg.name);
-              }
-            });
-            users.forEach((name, userId) => {
-              const opt = document.createElement('option');
-              opt.value = `dm:${userId}`;
-              opt.textContent = `${name} (DM)`;
-              convSelect.appendChild(opt);
-            });
-          }
-        }
-      } catch (e) { 
-        console.warn('Bulk Fetch: failed to load DMs', e); 
-        console.log('[GM+ Bulk Fetch] Error details:', e);
+        console.log('[GM+ Bulk Fetch] Populating conversation selector from IndexedDB...');
+        
+        // Get groups
+        const groupMapping = await getGroupMapping();
+        console.log(`[GM+ Bulk Fetch] Found ${groupMapping.size} groups`);
+        
+        groupMapping.forEach((name, id) => {
+          const opt = document.createElement('option');
+          opt.value = `group:${id}`;
+          opt.textContent = name;
+          convSelect.appendChild(opt);
+        });
+        
+        // Get DMs
+        const userMapping = await getUserMapping();
+        console.log(`[GM+ Bulk Fetch] Found ${userMapping.size} users`);
+        
+        userMapping.forEach((name, id) => {
+          const opt = document.createElement('option');
+          opt.value = `dm:${id}`;
+          opt.textContent = `${name} (DM)`;
+          convSelect.appendChild(opt);
+        });
+        
+        console.log(`[GM+ Bulk Fetch] Populated selector with ${groupMapping.size} groups and ${userMapping.size} DMs`);
+      } catch (error) {
+        console.error('[GM+ Bulk Fetch] Error populating selector:', error);
       }
     })();
 
@@ -3076,13 +4136,15 @@
             ${validation.issues.length > 0 ? `
               <div style="background:#1a1a1a;border:1px solid #333;border-radius:4px;padding:8px;">
                 <div style="color:#f57c00;font-size:12px;margin-bottom:4px;font-weight:600;">Cache Issues:</div>
-                ${validation.issues.slice(0, 5).map(issue => `<div style="color:#888;font-size:11px;">• ${issue}</div>`).join('')}
+                ${validation.issues.slice(0, 5).map(issue => `<div style="color:#888;font-size:12px;">• ${issue}</div>`).join('')}
                 ${validation.issues.length > 5 ? `<div style="color:#666;font-size:11px;">... and ${validation.issues.length - 5} more</div>` : ''}
               </div>
-            ` : ''}
-            <div style="color:#888;font-size:14px;margin-top:12px;">
-              Messages are compressed using LZString for efficient storage.
-            </div>
+            ` : `
+              <div style="background:#1a1a1a;border:1px solid #28a745;border-radius:4px;padding:12px;text-align:center;">
+                <div style="color:#28a745;font-size:16px;">✅ Cache is healthy!</div>
+                <div style="color:#888;font-size:12px;margin-top:4px;">No issues detected</div>
+              </div>
+            `}
           </div>
         `;
         
@@ -3444,7 +4506,10 @@
           const testPath = '/chats/test-navigation';
           window.history.pushState({}, '', testPath);
           window.dispatchEvent(new PopStateEvent('popstate', { state: {} }));
-          window.dispatchEvent(new CustomEvent('navigate', { detail: { path: testPath } }));
+          window.dispatchEvent(new CustomEvent('navigate', { 
+            detail: { path: testPath } 
+          }));
+          
           window.dispatchEvent(new CustomEvent('routechange', { detail: { path: testPath } }));
           
           setTimeout(() => {
@@ -3456,7 +4521,7 @@
             
             resultText += `Events fired: ${eventsFired.length > 0 ? eventsFired.join(', ') : 'none'}<br>`;
             resultText += `URL changed to: ${window.location.pathname}<br>`;
-            resultText += 'URL restored to original<br><br>';
+            resultText += `URL restored to original<br><br>`;
             
             const frameworks = [];
             if (window.React) frameworks.push('React');
@@ -3763,6 +4828,7 @@
     panes.push({ btn: addTrayBtn(tray, SVGs.font,  'Fonts',        () => open(0)), pane: fontPane  });
     panes.push({ btn: addTrayBtn(tray, SVGs.save,  'MessageCacher', () => open(1)), pane: cachePane });
     panes.push({ btn: addTrayBtn(tray, SVGs.bars,  'Stats',         () => open(2)), pane: statsPane });
+    addTrayBtn(tray, SVGs.eye, 'Message Viewer', () => MessageViewer.show());
 
     let isDragging = false;
     let dragStartTarget = null;
@@ -3903,7 +4969,6 @@
       const messageCount = Object.keys(ev.data.payload || {}).length;
       console.log(`[GM+ Cache] Received ${messageCount} messages from page script`);
       
-      // Update real-time activity indicator if it exists
       const indicator = document.querySelector('.gm-cache-pane')?.querySelector('[style*="Monitoring"]')?.parentElement;
       if (indicator && messageCount > 0) {
         const isNewMessage = ev.data.metadata?.source === 'realtime' || ev.data.metadata?.new_count > 0;
@@ -3919,10 +4984,9 @@
             </div>
           `;
           
-          // Reset indicator after 3 seconds
           setTimeout(() => {
             if (indicator) {
-              indicator.innerHTML = '<div style="font-size:12px;color:#888;">📡 Monitoring for new messages...</div>';
+              indicator.innerHTML = '<div style="font-size:12px;color:#888;">Monitoring for new messages...</div>';
             }
           }, 3000);
         }
@@ -3939,5 +5003,40 @@
       Stats.handle(ev.data.payload);
     }
   });
+
+  const checkForPendingNavigation = () => {
+    const targetData = sessionStorage.getItem('gm_plus_target_message');
+    if (targetData) {
+      try {
+        const target = JSON.parse(targetData);
+        const age = Date.now() - target.timestamp;
+        
+        if (age < 30000) {
+          console.log('[GM+ Search Navigation] Found pending navigation:', target);
+          
+          sessionStorage.removeItem('gm_plus_target_message');
+          
+          setTimeout(() => {
+            console.log('[GM+ Search Navigation] Starting context loading from sessionStorage');
+            loadMessageContext(target.messageId, target.groupId, target.conversationId || target.otherUserId);
+          }, 3000);
+        } else {
+          console.log('[GM+ Search Navigation] Clearing old navigation intent (age:', age, 'ms)');
+          sessionStorage.removeItem('gm_plus_target_message');
+        }
+      } catch (error) {
+        console.error('[GM+ Search Navigation] Error parsing pending navigation:', error);
+        sessionStorage.removeItem('gm_plus_target_message');
+      }
+    }
+  };
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', () => {
+      setTimeout(checkForPendingNavigation, 1000);
+    });
+  } else {
+    setTimeout(checkForPendingNavigation, 1000);
+  }
 
 })();
