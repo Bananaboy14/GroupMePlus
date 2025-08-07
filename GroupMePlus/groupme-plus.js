@@ -1112,6 +1112,15 @@
         messageId, groupId, userIdOrConversationId
       });
       
+      if (!Cache) {
+        console.warn('[GM+ Context] Cache not available, falling back to basic navigation');
+        setTimeout(() => {
+          findAndScrollToMessage(messageId, groupId, userIdOrConversationId);
+        }, 1000);
+        return;
+      }
+      
+      // Find the target message in cache first
       const cachedMessages = await Cache.all();
       const targetMessage = cachedMessages.find(m => m.id === messageId);
       
@@ -1123,12 +1132,113 @@
         return;
       }
       
+      console.log(`[GM+ Context] Found target message in cache:`, {
+        id: targetMessage.id,
+        text: targetMessage.text?.substring(0, 50) + '...',
+        created_at: new Date(targetMessage.created_at * 1000).toLocaleString()
+      });
+      
+      // Get messages around the target for context
+      let contextMessages = [];
+      if (groupId) {
+        contextMessages = cachedMessages.filter(msg => msg.group_id === groupId);
+      } else {
+        contextMessages = cachedMessages.filter(msg => {
+          return (msg.is_dm || msg.conversation_id) && (
+            msg.user_id === userIdOrConversationId || 
+            msg.sender_id === userIdOrConversationId ||
+            msg.dm_other_user_id === userIdOrConversationId ||
+            (msg.conversation_id && msg.conversation_id.includes(userIdOrConversationId))
+          );
+        });
+      }
+      
+      // Sort by timestamp
+      contextMessages.sort((a, b) => b.created_at - a.created_at);
+      
+      // Find the target message index in the sorted list
+      const targetIndex = contextMessages.findIndex(msg => msg.id === messageId);
+      
+      if (targetIndex === -1) {
+        console.warn('[GM+ Context] Target message not found in context messages');
+        setTimeout(() => {
+          findAndScrollToMessage(messageId, groupId, userIdOrConversationId);
+        }, 1000);
+        return;
+      }
+      
+      console.log(`[GM+ Context] Target message is at index ${targetIndex} of ${contextMessages.length} messages`);
+      
+      // Preload some messages around the target using the API
       const headers = getAuthHeaders();
-      let contextLoaded = false;
+      const contextSize = 25; // Load 25 messages before and after
       
-  console.log('[GM+ Context] Skipping pre-fetch, proceeding to scroll to message');
+      try {
+        // Try to load some newer messages (if not at the top)
+        if (targetIndex > 0) {
+          const newerMessage = contextMessages[Math.max(0, targetIndex - contextSize)];
+          let apiUrl = '';
+          
+          if (groupId) {
+            apiUrl = `https://api.groupme.com/v3/groups/${groupId}/messages?acceptFiles=1&limit=${contextSize}&since_id=${newerMessage.id}`;
+          } else {
+            apiUrl = `https://api.groupme.com/v3/direct_messages?acceptFiles=1&limit=${contextSize}&other_user_id=${userIdOrConversationId}&since_id=${newerMessage.id}`;
+          }
+          
+          console.log(`[GM+ Context] Fetching newer messages: ${apiUrl}`);
+          const newerResp = await fetch(apiUrl, { headers, credentials: 'omit' });
+          
+          if (newerResp.ok) {
+            const newerData = await newerResp.json();
+            const newerMessages = groupId ? 
+              (newerData.response?.messages || []) : 
+              (newerData.response?.direct_messages || []);
+            
+            if (newerMessages.length > 0) {
+              console.log(`[GM+ Context] Loaded ${newerMessages.length} newer messages`);
+              // Store them in cache
+              const batch = Object.fromEntries(newerMessages.map(m => [m.id, m]));
+              await Cache.store(batch);
+            }
+          }
+        }
+        
+        // Try to load some older messages (if not at the bottom)
+        if (targetIndex < contextMessages.length - 1) {
+          const olderMessage = contextMessages[Math.min(contextMessages.length - 1, targetIndex + contextSize)];
+          let apiUrl = '';
+          
+          if (groupId) {
+            apiUrl = `https://api.groupme.com/v3/groups/${groupId}/messages?acceptFiles=1&limit=${contextSize}&before_id=${olderMessage.id}`;
+          } else {
+            apiUrl = `https://api.groupme.com/v3/direct_messages?acceptFiles=1&limit=${contextSize}&other_user_id=${userIdOrConversationId}&before_id=${olderMessage.id}`;
+          }
+          
+          console.log(`[GM+ Context] Fetching older messages: ${apiUrl}`);
+          const olderResp = await fetch(apiUrl, { headers, credentials: 'omit' });
+          
+          if (olderResp.ok) {
+            const olderData = await olderResp.json();
+            const olderMessages = groupId ? 
+              (olderData.response?.messages || []) : 
+              (olderData.response?.direct_messages || []);
+            
+            if (olderMessages.length > 0) {
+              console.log(`[GM+ Context] Loaded ${olderMessages.length} older messages`);
+              // Store them in cache
+              const batch = Object.fromEntries(olderMessages.map(m => [m.id, m]));
+              await Cache.store(batch);
+            }
+          }
+        }
+        
+      } catch (apiError) {
+        console.warn('[GM+ Context] API context loading failed:', apiError);
+        // Continue with existing cache
+      }
       
-      const delay = contextLoaded ? 2000 : 1000;
+      // Now proceed with navigation
+      const delay = 1500; // Give a bit more time for any context loading
       setTimeout(() => {
         findAndScrollToMessage(messageId, groupId, userIdOrConversationId);
       }, delay);
@@ -1156,11 +1266,13 @@
       if (!chatId) {
         throw new Error('No group ID, user ID, or conversation ID provided');
       }
+      
       // Select the appropriate chat in the dropdown
       const chatSelector = document.querySelector('.gm-chat-selector');
       if (!chatSelector) {
         throw new Error('Chat selector not found');
       }
+      
       // Wait until options are populated
       await new Promise(resolve => {
         let attempts = 0;
@@ -1171,8 +1283,10 @@
           }
         }, 200);
       });
+      
       // Set pending message to jump after messages load
       MessageViewer.setPendingJumpMessage(messageId);
+      
       // Set the chat value with correct prefix and trigger change
       const prefix = groupId ? 'group' : 'dm';
       chatSelector.value = `${prefix}:${chatId}`;
@@ -1502,50 +1616,51 @@
   }
 
   function highlightMessage(messageElement) {
-    const originalStyle = messageElement.style.cssText;
-    
-    const indicator = document.createElement('div');
-    indicator.style.cssText = `
+    // Create an instantaneous highlight overlay
+    const highlight = document.createElement('div');
+    highlight.style.cssText = `
       position: absolute;
-      top: -8px;
-      right: -8px;
-      background: #667eea;
-      color: white;
-      padding: 2px 6px;
-      border-radius: 10px;
-      font-size: 10px;
-      font-weight: bold;
-      z-index: 1000;
-      animation: fadeInOut 3s ease-in-out;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: linear-gradient(45deg, rgba(102, 126, 234, 0.4), rgba(102, 126, 234, 0.2));
+      border: 2px solid #667eea;
+      border-radius: 8px;
+      z-index: 10;
+      pointer-events: none;
+      opacity: 1;
+      transition: opacity 2s ease-out;
     `;
-    indicator.textContent = '🔍 SEARCH RESULT';
-    document.body.appendChild(indicator);
+    
+    // Add CSS animations if not already present
     if (!document.getElementById('search-highlight-animation')) {
       const style = document.createElement('style');
       style.id = 'search-highlight-animation';
       style.textContent = `
-        @keyframes fadeInOut {
-          0% { opacity: 0; transform: scale(0.8); }
-          20% { opacity: 1; transform: scale(1); }
-          80% { opacity: 1; transform: scale(1); }
-          100% { opacity: 0; transform: scale(0.8); }
+        .gm-search-highlight-fadeout {
+          opacity: 0 !important;
         }
       `;
       document.head.appendChild(style);
     }
     
+    // Ensure the message element is positioned relatively
     const originalPosition = messageElement.style.position;
     messageElement.style.position = 'relative';
-    messageElement.appendChild(indicator);
     
-    messageElement.style.cssText += '; background: rgba(102, 126, 234, 0.3) !important; transition: background 0.3s ease; border: 2px solid #667eea !important; border-radius: 8px !important;';
+    // Add the highlight immediately (no fade-in animation)
+    messageElement.appendChild(highlight);
     
+    // Start fade-out after 1 second
     setTimeout(() => {
-      messageElement.style.cssText = originalStyle;
+      highlight.classList.add('gm-search-highlight-fadeout');
+    }, 1000);
+    
+    // Clean up after fade-out completes
+    setTimeout(() => {
+      if (highlight.parentNode) highlight.parentNode.removeChild(highlight);
       messageElement.style.position = originalPosition;
-      if (indicator.parentNode) {
-        indicator.parentNode.removeChild(indicator);
-      }
     }, 3000);
   }
 
@@ -1833,6 +1948,7 @@
     let allMessages = [];
     let visibleMessages = [];
     let currentModal = null;
+    let currentContext = null;
     // Message ID pending navigation after chat load
     let pendingJumpMessageId = null;
     
@@ -1862,7 +1978,57 @@
       return text.replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
     };
     
-    // Utility function to scroll to a specific message
+    // Improved highlighting function with instantaneous visual feedback
+    const highlightMessage = (messageElement, messageId) => {
+      // Create an instantaneous highlight overlay
+      const highlight = document.createElement('div');
+      highlight.style.cssText = `
+        position: absolute;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        background: linear-gradient(45deg, rgba(102, 126, 234, 0.4), rgba(102, 126, 234, 0.2));
+        border: 2px solid #667eea;
+        border-radius: 8px;
+        z-index: 10;
+        pointer-events: none;
+        opacity: 1;
+        transition: opacity 2s ease-out;
+      `;
+      
+      // Add CSS animations if not already present
+      if (!document.getElementById('message-highlight-animations')) {
+        const style = document.createElement('style');
+        style.id = 'message-highlight-animations';
+        style.textContent = `
+          .gm-highlight-fadeout {
+            opacity: 0 !important;
+          }
+        `;
+        document.head.appendChild(style);
+      }
+      
+      // Ensure the message element is positioned relatively
+      const originalPosition = messageElement.style.position;
+      messageElement.style.position = 'relative';
+      
+      // Add the highlight immediately (no fade-in animation)
+      messageElement.appendChild(highlight);
+      
+      // Start fade-out after 1 second
+      setTimeout(() => {
+        highlight.classList.add('gm-highlight-fadeout');
+      }, 1000);
+      
+      // Clean up after fade-out completes
+      setTimeout(() => {
+        if (highlight.parentNode) highlight.parentNode.removeChild(highlight);
+        messageElement.style.position = originalPosition;
+      }, 3000);
+    };
+    
+    // Utility function to scroll to a specific message with improved highlighting
     const scrollToMessage = (messageId) => {
       const messageElement = document.getElementById(`gm-msg-${messageId}`);
       if (messageElement) {
@@ -1871,37 +2037,165 @@
           block: 'center' 
         });
         
-        // Highlight the message for visibility
-        messageElement.style.backgroundColor = 'rgba(26, 188, 156, 0.3)';
+        // Apply improved highlighting
         setTimeout(() => {
-          messageElement.style.transition = 'background-color 1s ease';
-          messageElement.style.backgroundColor = '';
-        }, 4000);
+          highlightMessage(messageElement, messageId);
+        }, 300); // Small delay to allow scrolling to complete
         
         return true;
       }
       return false;
     };
     
-    const navigateToMessage = (messageId) => {
+    // Brute-force message navigation that loads chunks until target is found
+    const navigateToMessage = async (messageId) => {
+      console.log(`[GM+ Message Viewer] Navigating to message ${messageId}`);
+      console.log(`[GM+ Message Viewer] currentModal:`, currentModal);
+      
+      // First, try to find the message in current view
       if (scrollToMessage(messageId)) {
+        console.log(`[GM+ Message Viewer] Message ${messageId} found in current view`);
         return;
       }
       
-      // If not visible, we need to find the message and potentially load more messages
-      const messageIndex = allMessages.findIndex(msg => msg.id === messageId);
-      if (messageIndex !== -1) {
-        // Force render the message by simulating scroll to that position
-        const container = currentModal?.modal.querySelector('.gm-message-viewer-container');
-        if (container) {
-          const scrollTop = messageIndex * ITEM_HEIGHT;
-          container.scrollTop = scrollTop;
-          
-          // Wait for render, then try to scroll to the specific message
-          setTimeout(() => {
-            scrollToMessage(messageId);
-          }, 100);
+      // Brute force approach: load chunks of 100 messages until we find it
+      const chunkSize = 100;
+      let found = false;
+      
+      // Try multiple container selectors
+      let container = currentModal?.modal.querySelector('.gm-messages-container');
+      if (!container) {
+        console.log(`[GM+ Message Viewer] Primary container (.gm-messages-container) not found, trying alternatives...`);
+        container = currentModal?.modal.querySelector('.gm-messages-viewport');
+        if (!container) {
+          container = currentModal?.modal.querySelector('.gm-message-viewer-container');
+          if (!container) {
+            container = currentModal?.modal.querySelector('.gm-message-viewer');
+            if (!container) {
+              container = document.querySelector('.gm-messages-container');
+              if (!container) {
+                container = document.querySelector('.gm-messages-viewport');
+              }
+            }
+          }
         }
+      }
+      
+      console.log(`[GM+ Message Viewer] Found container:`, container);
+      console.log(`[GM+ Message Viewer] Container classList:`, container?.classList);
+      
+      if (!container) {
+        console.error('[GM+ Message Viewer] No suitable container found');
+        console.log('[GM+ Message Viewer] Available modal elements:', currentModal?.modal.querySelectorAll('*'));
+        return;
+      }
+      
+      console.log(`[GM+ Message Viewer] Starting brute-force search through ${allMessages.length} messages`);
+      console.log(`[GM+ Message Viewer] Target message ID: ${messageId}`);
+      
+      for (let startIndex = 0; startIndex < allMessages.length && !found; startIndex += chunkSize) {
+        const endIndex = Math.min(startIndex + chunkSize, allMessages.length);
+        console.log(`[GM+ Message Viewer] Loading chunk ${startIndex}-${endIndex} (${endIndex - startIndex} messages)`);
+        
+        const chunkMessages = allMessages.slice(startIndex, endIndex);
+        console.log(`[GM+ Message Viewer] Chunk message IDs:`, chunkMessages.map(m => m.id).slice(0, 5), '...');
+        
+        currentContext = {
+          startIndex: startIndex,
+          endIndex: endIndex,
+          messages: chunkMessages
+        };
+        
+        console.log(`[GM+ Message Viewer] Updated currentContext:`, currentContext);
+        
+        const targetInChunk = currentContext.messages.find(msg => msg.id === messageId);
+        console.log(`[GM+ Message Viewer] Target in chunk ${startIndex}-${endIndex}:`, !!targetInChunk);
+        
+        if (targetInChunk) {
+          console.log(`[GM+ Message Viewer] Found target message in chunk ${startIndex}-${endIndex}`);
+          console.log(`[GM+ Message Viewer] Target message:`, targetInChunk);
+          
+          console.log(`[GM+ Message Viewer] Calling updateVirtualScroll...`);
+          
+          // Find the existing viewport to preserve its styling
+          let viewport = container.querySelector('.gm-messages-viewport');
+          if (!viewport) {
+            console.warn('[GM+ Message Viewer] Viewport not found, creating one');
+            viewport = document.createElement('div');
+            viewport.className = 'gm-messages-viewport';
+            viewport.style.cssText = 'height: 95vh; overflow-y: auto; position: relative; font-family: Poppins, sans-serif;';
+            container.appendChild(viewport);
+          }
+          
+          // Render only the chunk messages in the viewport
+          visibleMessages = currentContext.messages;
+          const messagesHtml = visibleMessages.map((msg, i) => 
+            renderMessage(msg, currentContext.startIndex + i)
+          ).join('');
+          
+          // Only replace the viewport content, preserving its styling
+          viewport.innerHTML = `
+            <div style="height: ${currentContext.startIndex * ITEM_HEIGHT}px;"></div>
+            ${messagesHtml}
+            <div style="height: ${(allMessages.length - currentContext.endIndex) * ITEM_HEIGHT}px;"></div>
+          `;
+          
+          await new Promise((resolve) => {
+            setTimeout(() => {
+              const messageElement = document.getElementById(`gm-msg-${messageId}`);
+              console.log(`[GM+ Message Viewer] Found message element:`, messageElement);
+              
+              if (messageElement) {
+                console.log(`[GM+ Message Viewer] Successfully found and highlighting message ${messageId}`);
+                highlightMessage(messageElement, messageId);
+                messageElement.scrollIntoView({ 
+                  behavior: 'smooth', 
+                  block: 'center' 
+                });
+                found = true;
+                resolve();
+              } else {
+                console.warn(`[GM+ Message Viewer] Message element not found in DOM, checking all elements...`);
+                const allMessageElements = container.querySelectorAll('[id^="gm-msg-"]');
+                console.log(`[GM+ Message Viewer] All message elements in container:`, Array.from(allMessageElements).map(el => el.id));
+                
+                let retries = 3;
+                const retryFind = () => {
+                  setTimeout(() => {
+                    const retryElement = document.getElementById(`gm-msg-${messageId}`);
+                    if (retryElement) {
+                      console.log(`[GM+ Message Viewer] Found message element on retry`);
+                      highlightMessage(retryElement, messageId);
+                      retryElement.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                      found = true;
+                      resolve();
+                    } else if (retries > 0) {
+                      retries--;
+                      retryFind();
+                    } else {
+                      console.warn(`[GM+ Message Viewer] Failed to find message element after retries`);
+                      resolve();
+                    }
+                  }, 200);
+                };
+                retryFind();
+              }
+            }, 100);
+          });
+          
+          break;
+        } else {
+          console.log(`[GM+ Message Viewer] Target not in chunk, rendering for progress...`);
+          updateVirtualScroll(container);
+          
+          await new Promise(resolve => setTimeout(resolve, 50));
+        }
+      }
+      
+      if (!found) {
+        console.warn(`[GM+ Message Viewer] Message ${messageId} not found in any chunk`);
+        console.log(`[GM+ Message Viewer] Searched ${allMessages.length} total messages`);
+        Modal.alert('Message Not Found', 'The target message was not found in the current chat. It may have been deleted or is from a different conversation.', 'error');
       }
     };
     
@@ -2045,17 +2339,33 @@
       return null;
     };
     
-    const updateVirtualScroll = (container) => {
+    const updateVirtualScroll = (container, targetMessageIndex = null) => {
       const viewport = container.querySelector('.gm-messages-viewport');
       const scrollTop = viewport.scrollTop;
       const viewportHeight = viewport.clientHeight;
       
       const itemsPerPage = Math.ceil(viewportHeight / ITEM_HEIGHT);
-      const startIndex = Math.max(0, Math.floor(scrollTop / ITEM_HEIGHT) - BUFFER_SIZE);
-      const endIndex = Math.min(
-        startIndex + itemsPerPage + (BUFFER_SIZE * 2),
-        allMessages.length
-      );
+      let startIndex, endIndex;
+      
+      if (targetMessageIndex !== null) {
+        // Direct positioning to target message
+        const contextSize = Math.floor(itemsPerPage / 2); // Show context around target
+        startIndex = Math.max(0, targetMessageIndex - contextSize);
+        endIndex = Math.min(startIndex + itemsPerPage + (BUFFER_SIZE * 2), allMessages.length);
+        
+        // Adjust if we're near the end
+        if (endIndex >= allMessages.length) {
+          endIndex = allMessages.length;
+          startIndex = Math.max(0, endIndex - itemsPerPage - (BUFFER_SIZE * 2));
+        }
+      } else {
+        // Normal scroll-based positioning
+        startIndex = Math.max(0, Math.floor(scrollTop / ITEM_HEIGHT) - BUFFER_SIZE);
+        endIndex = Math.min(
+          startIndex + itemsPerPage + (BUFFER_SIZE * 2),
+          allMessages.length
+        );
+      }
       
       visibleMessages = allMessages.slice(startIndex, endIndex);
       
@@ -2073,6 +2383,16 @@
           </div>
         </div>
       `;
+      
+      // If we're directly positioning to a target message, scroll to it
+      if (targetMessageIndex !== null) {
+        const relativeIndex = targetMessageIndex - startIndex;
+        const targetScrollTop = offsetY + (relativeIndex * ITEM_HEIGHT);
+        
+        // Center the target message in the viewport
+        const centeredScrollTop = targetScrollTop - (viewportHeight / 2) + (ITEM_HEIGHT / 2);
+        viewport.scrollTop = Math.max(0, centeredScrollTop);
+      }
       
       // add click handlers for message details
       viewport.querySelectorAll('.gm-message-item').forEach(item => {
@@ -2182,6 +2502,18 @@
         
         viewport.addEventListener('scroll', () => updateVirtualScroll(container));
         
+        // Check for pending jump message after loading
+        if (pendingJumpMessageId) {
+          console.log(`[GM+ Message Viewer] Processing pending jump to message ${pendingJumpMessageId}`);
+          
+          // Small delay to allow the DOM to update
+          setTimeout(() => {
+            navigateToMessage(pendingJumpMessageId);
+            // Clear the pending message after processing
+            pendingJumpMessageId = null;
+          }, 500);
+        }
+        
       } catch (error) {
         console.error('[GM+ Message Viewer] Error loading messages:', error);
         viewport.innerHTML = '<div class="gm-no-messages">Error loading messages</div>';
@@ -2194,22 +2526,18 @@
           selector.removeChild(selector.lastChild);
         }
         
-        // First, get existing mappings quickly
         const [groupMapping, userMapping] = await Promise.all([
           getGroupMapping(),
           getUserMapping()
         ]);
         
-        // Get cached messages to find which chats have activity
         const cachedMessages = await Cache.all();
         const groups = new Map();
         const dms = new Map();
         
-        // Build chat lists from cached messages
         cachedMessages.forEach(msg => {
           if (msg.group_id) {
             if (!groups.has(msg.group_id)) {
-              // Use real group name if available, otherwise fall back to generic name
               const groupName = groupMapping.get(msg.group_id) || msg.group_name || `Group ${msg.group_id}`;
               groups.set(msg.group_id, {
                 id: msg.group_id,
@@ -2222,7 +2550,6 @@
               if (msg.created_at > existing.lastMessage) {
                 existing.lastMessage = msg.created_at;
               }
-              // Update name if we find a better one
               if (msg.group_name && !existing.name.startsWith('Group ')) {
                 existing.name = msg.group_name;
               }
@@ -2230,7 +2557,6 @@
           } else if (msg.is_dm || msg.conversation_id) {
             const dmId = msg.dm_other_user_id || msg.user_id || msg.sender_id;
             if (dmId && !dms.has(dmId)) {
-              // Use real user name if available, otherwise fall back to message name or generic name
               const userName = userMapping.get(dmId) || msg.name || `User ${dmId}`;
               dms.set(dmId, {
                 id: dmId,
@@ -2243,7 +2569,6 @@
               if (msg.created_at > existing.lastMessage) {
                 existing.lastMessage = msg.created_at;
               }
-              // Update name if we have a better one
               const betterName = userMapping.get(dmId);
               if (betterName && existing.name.startsWith('User ')) {
                 existing.name = betterName;
@@ -2252,14 +2577,13 @@
           }
         });
         
-        // Add any additional groups/users from mappings that might not have cached messages
         groupMapping.forEach((name, id) => {
           if (!groups.has(id)) {
             groups.set(id, {
               id: id,
               name: name,
               type: 'group',
-              lastMessage: 0 // No messages cached
+              lastMessage: 0
             });
           }
         });
@@ -2270,16 +2594,14 @@
               id: id,
               name: name,
               type: 'dm',
-              lastMessage: 0 // No messages cached
+              lastMessage: 0
             });
           }
         });
         
-        // Sort by last message time (most recent first)
         const sortedGroups = Array.from(groups.values()).sort((a, b) => b.lastMessage - a.lastMessage);
         const sortedDMs = Array.from(dms.values()).sort((a, b) => b.lastMessage - a.lastMessage);
         
-        // Add groups to selector
         sortedGroups.forEach(group => {
           const option = document.createElement('option');
           option.value = `group:${group.id}`;
@@ -2287,7 +2609,6 @@
           selector.appendChild(option);
         });
         
-        // Add DMs to selector
         sortedDMs.forEach(dm => {
           const option = document.createElement('option');
           option.value = `dm:${dm.id}`;
@@ -2313,7 +2634,6 @@
       modal.className = 'gm-modal gm-message-viewer-modal';
       modal.style.pointerEvents = 'auto';
       
-      // Store the modal instance properly
       currentModal = modalInstance;
       
       title.textContent = 'Message Viewer';
@@ -2361,10 +2681,6 @@
         const [type, id] = value.split(':');
         currentChat = { type, id };
         await loadChatMessages(id, type);
-        if (pendingJumpMessageId) {
-          MessageViewer.navigateToMessage(pendingJumpMessageId);
-          pendingJumpMessageId = null;
-        }
       });
     };
     
@@ -2535,7 +2851,7 @@
       .gm-message-attachment{background:#333;border-radius:4px;padding:8px;margin-bottom:4px;font-size:12px;color:#ccc}
       .gm-message-reactions{margin-top:8px;display:flex;gap:4px;flex-wrap:wrap}
       .gm-message-reaction{background:#444;border-radius:12px;padding:2px 6px;font-size:11px;color:#ddd;display:flex;align-items:center;gap:2px}
-  .gm-message-reaction-emoji{width:14px;height:14px;display:inline-block;vertical-align:middle;font-size:14px;line-height:14px}
+      .gm-message-reaction-emoji{width:14px;height:14px;display:inline-block;vertical-align:middle;font-size:14px;line-height:14px}
       .gm-message-pill{position:absolute;left:-8px;top:50%;transform:translateY(-50%);width:4px;height:20px;background:#667eea;border-radius:2px}
       .gm-message-edited{color:#888;font-size:11px;font-style:italic}
       .gm-message-reply{border-left:3px solid #667eea;background:#333;border-radius:0 4px 4px 0;padding:8px 12px;margin-bottom:8px;font-size:12px}
@@ -2546,6 +2862,34 @@
       .gm-message-details-content{font-family:ui-monospace,SFMono-Regular,'SF Mono',monospace;font-size:12px;background:#0f0f0f;padding:16px;border-radius:6px;white-space:pre-wrap;max-height:60vh;overflow-y:auto}
       .gm-loading-spinner{display:flex;align-items:center;justify-content:center;height:200px;color:#888}
       .gm-no-messages{display:flex;align-items:center;justify-content:center;height:200px;color:#888;font-style:italic}
+      
+      /* Enhanced Message Highlighting Animations */
+      @keyframes messageHighlight {
+        0% { opacity: 0; transform: scale(0.95); box-shadow: 0 0 0 rgba(102, 126, 234, 0.4); }
+        15% { opacity: 1; transform: scale(1); box-shadow: 0 0 20px rgba(102, 126, 234, 0.6); }
+        50% { opacity: 1; transform: scale(1.02); box-shadow: 0 0 30px rgba(102, 126, 234, 0.8); }
+        85% { opacity: 1; transform: scale(1); box-shadow: 0 0 20px rgba(102, 126, 234, 0.6); }
+        100% { opacity: 0; transform: scale(0.95); box-shadow: 0 0 0 rgba(102, 126, 234, 0.4); }
+      }
+      @keyframes indicatorPulse {
+        0% { opacity: 0; transform: translateY(-10px) scale(0.8); }
+        15% { opacity: 1; transform: translateY(0) scale(1); }
+        30% { opacity: 1; transform: translateY(0) scale(1.1); }
+        50% { opacity: 1; transform: translateY(0) scale(1.05); }
+        70% { opacity: 1; transform: translateY(0) scale(1.1); }
+        85% { opacity: 1; transform: translateY(0) scale(1); }
+        100% { opacity: 0; transform: translateY(-5px) scale(0.9); }
+      }
+      
+      /* Message Found Animation */
+      .gm-message-found {
+        animation: messageFoundPulse 2s ease-in-out infinite;
+      }
+      @keyframes messageFoundPulse {
+        0% { background: rgba(102, 126, 234, 0.1); }
+        50% { background: rgba(102, 126, 234, 0.3); }
+        100% { background: rgba(102, 126, 234, 0.1); }
+      }
     `;
     const s = document.createElement('style');
     s.id = 'gm-sidebar-styles';
