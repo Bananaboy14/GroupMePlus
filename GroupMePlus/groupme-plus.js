@@ -1267,13 +1267,11 @@
         throw new Error('No group ID, user ID, or conversation ID provided');
       }
       
-      // Select the appropriate chat in the dropdown
       const chatSelector = document.querySelector('.gm-chat-selector');
       if (!chatSelector) {
         throw new Error('Chat selector not found');
       }
       
-      // Wait until options are populated
       await new Promise(resolve => {
         let attempts = 0;
         const interval = setInterval(() => {
@@ -1284,10 +1282,8 @@
         }, 200);
       });
       
-      // Set pending message to jump after messages load
       MessageViewer.setPendingJumpMessage(messageId);
       
-      // Set the chat value with correct prefix and trigger change
       const prefix = groupId ? 'group' : 'dm';
       chatSelector.value = `${prefix}:${chatId}`;
       chatSelector.dispatchEvent(new Event('change'));
@@ -1616,8 +1612,12 @@
   }
 
   function highlightMessage(messageElement) {
-    // Create an instantaneous highlight overlay
+    const allExistingHighlights = document.querySelectorAll('.gm-message-highlight');
+    allExistingHighlights.forEach(highlight => highlight.remove());
+    
+
     const highlight = document.createElement('div');
+    highlight.className = 'gm-message-highlight';
     highlight.style.cssText = `
       position: absolute;
       top: 0;
@@ -1633,7 +1633,6 @@
       transition: opacity 2s ease-out;
     `;
     
-    // Add CSS animations if not already present
     if (!document.getElementById('search-highlight-animation')) {
       const style = document.createElement('style');
       style.id = 'search-highlight-animation';
@@ -1645,19 +1644,15 @@
       document.head.appendChild(style);
     }
     
-    // Ensure the message element is positioned relatively
     const originalPosition = messageElement.style.position;
     messageElement.style.position = 'relative';
     
-    // Add the highlight immediately (no fade-in animation)
     messageElement.appendChild(highlight);
     
-    // Start fade-out after 1 second
     setTimeout(() => {
       highlight.classList.add('gm-search-highlight-fadeout');
     }, 1000);
     
-    // Clean up after fade-out completes
     setTimeout(() => {
       if (highlight.parentNode) highlight.parentNode.removeChild(highlight);
       messageElement.style.position = originalPosition;
@@ -1665,7 +1660,7 @@
   }
 
   const Modal = (() => {
-    let modalStack = []; // Stack to track multiple modals
+    let modalStack = [];
 
     const repositionModal = (modal) => {
       const rect = modal.getBoundingClientRect();
@@ -1949,7 +1944,7 @@
     let visibleMessages = [];
     let currentModal = null;
     let currentContext = null;
-    // Message ID pending navigation after chat load
+    let isNavigating = false;
     let pendingJumpMessageId = null;
     
     const ITEM_HEIGHT = 120;
@@ -1978,10 +1973,13 @@
       return text.replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
     };
     
-    // Improved highlighting function with instantaneous visual feedback
     const highlightMessage = (messageElement, messageId) => {
-      // Create an instantaneous highlight overlay
+      // Remove ALL existing highlights globally to prevent stacking
+      const allExistingHighlights = document.querySelectorAll('.gm-message-highlight, [class*="gm-highlight"]');
+      allExistingHighlights.forEach(highlight => highlight.remove());
+      
       const highlight = document.createElement('div');
+      highlight.className = 'gm-message-highlight';
       highlight.style.cssText = `
         position: absolute;
         top: 0;
@@ -1997,7 +1995,6 @@
         transition: opacity 2s ease-out;
       `;
       
-      // Add CSS animations if not already present
       if (!document.getElementById('message-highlight-animations')) {
         const style = document.createElement('style');
         style.id = 'message-highlight-animations';
@@ -2009,60 +2006,57 @@
         document.head.appendChild(style);
       }
       
-      // Ensure the message element is positioned relatively
       const originalPosition = messageElement.style.position;
       messageElement.style.position = 'relative';
       
-      // Add the highlight immediately (no fade-in animation)
       messageElement.appendChild(highlight);
       
-      // Start fade-out after 1 second
       setTimeout(() => {
         highlight.classList.add('gm-highlight-fadeout');
       }, 1000);
       
-      // Clean up after fade-out completes
       setTimeout(() => {
         if (highlight.parentNode) highlight.parentNode.removeChild(highlight);
         messageElement.style.position = originalPosition;
       }, 3000);
     };
     
-    // Utility function to scroll to a specific message with improved highlighting
     const scrollToMessage = (messageId) => {
       const messageElement = document.getElementById(`gm-msg-${messageId}`);
       if (messageElement) {
+        isNavigating = true;
+        
         messageElement.scrollIntoView({ 
           behavior: 'smooth', 
           block: 'center' 
         });
         
-        // Apply improved highlighting
         setTimeout(() => {
           highlightMessage(messageElement, messageId);
-        }, 300); // Small delay to allow scrolling to complete
+          setTimeout(() => {
+            isNavigating = false;
+          }, 1500);
+        }, 300);
         
         return true;
       }
       return false;
     };
     
-    // Brute-force message navigation that loads chunks until target is found
     const navigateToMessage = async (messageId) => {
       console.log(`[GM+ Message Viewer] Navigating to message ${messageId}`);
       console.log(`[GM+ Message Viewer] currentModal:`, currentModal);
       
-      // First, try to find the message in current view
+      isNavigating = false;
+      
       if (scrollToMessage(messageId)) {
         console.log(`[GM+ Message Viewer] Message ${messageId} found in current view`);
         return;
       }
       
-      // Brute force approach: load chunks of 100 messages until we find it
       const chunkSize = 100;
       let found = false;
       
-      // Try multiple container selectors
       let container = currentModal?.modal.querySelector('.gm-messages-container');
       if (!container) {
         console.log(`[GM+ Message Viewer] Primary container (.gm-messages-container) not found, trying alternatives...`);
@@ -2117,7 +2111,9 @@
           
           console.log(`[GM+ Message Viewer] Calling updateVirtualScroll...`);
           
-          // Find the existing viewport to preserve its styling
+          // Set navigation flag to prevent scroll interference
+          isNavigating = true;
+          
           let viewport = container.querySelector('.gm-messages-viewport');
           if (!viewport) {
             console.warn('[GM+ Message Viewer] Viewport not found, creating one');
@@ -2127,18 +2123,30 @@
             container.appendChild(viewport);
           }
           
-          // Render only the chunk messages in the viewport
+          // Ensure the container and modal body allow proper overflow and visibility
+          const modalBody = currentModal?.modal.querySelector('.gm-modal-body');
+          if (modalBody) {
+            modalBody.style.overflow = 'hidden'; // Keep modal body overflow hidden
+            modalBody.style.padding = '0';
+          }
+          container.style.overflow = 'hidden'; // Container should be hidden too
+          
           visibleMessages = currentContext.messages;
           const messagesHtml = visibleMessages.map((msg, i) => 
             renderMessage(msg, currentContext.startIndex + i)
           ).join('');
           
-          // Only replace the viewport content, preserving its styling
+          // Add padding to ensure messages are fully visible with extra space
           viewport.innerHTML = `
-            <div style="height: ${currentContext.startIndex * ITEM_HEIGHT}px;"></div>
-            ${messagesHtml}
-            <div style="height: ${(allMessages.length - currentContext.endIndex) * ITEM_HEIGHT}px;"></div>
+            <div style="padding: 40px 20px; min-height: calc(100% + 80px);">
+              ${messagesHtml}
+            </div>
           `;
+          
+          // Calculate the scroll position to center the target message with better visibility
+          const targetMessageIndex = currentContext.messages.findIndex(msg => msg.id === messageId);
+          // Add extra offset to account for padding and ensure message isn't cut off
+          const targetScrollTop = (targetMessageIndex * ITEM_HEIGHT) - (viewport.clientHeight / 2) + 80; // Add 80px for padding and spacing
           
           await new Promise((resolve) => {
             setTimeout(() => {
@@ -2147,11 +2155,43 @@
               
               if (messageElement) {
                 console.log(`[GM+ Message Viewer] Successfully found and highlighting message ${messageId}`);
-                highlightMessage(messageElement, messageId);
-                messageElement.scrollIntoView({ 
-                  behavior: 'smooth', 
-                  block: 'center' 
+                
+                // Scroll to position the message properly with smooth behavior
+                viewport.scrollTo({
+                  top: Math.max(0, targetScrollTop),
+                  behavior: 'smooth'
                 });
+                
+                // Add an observer to ensure the message stays visible after scrolling
+                const ensureVisibility = () => {
+                  const rect = messageElement.getBoundingClientRect();
+                  const viewportRect = viewport.getBoundingClientRect();
+                  
+                  // Check if message is cut off at top or bottom
+                  if (rect.top < viewportRect.top || rect.bottom > viewportRect.bottom) {
+                    console.log('[GM+ Message Viewer] Message partially cut off, adjusting scroll position');
+                    messageElement.scrollIntoView({ 
+                      behavior: 'smooth', 
+                      block: 'center', 
+                      inline: 'nearest' 
+                    });
+                  }
+                };
+                
+                // Check visibility after initial scroll completes
+                setTimeout(() => {
+                  ensureVisibility();
+                  
+                  // Add highlight after ensuring visibility
+                  setTimeout(() => {
+                    highlightMessage(messageElement, messageId);
+                    // Re-enable scroll handling after highlight is applied
+                    setTimeout(() => {
+                      isNavigating = false;
+                    }, 1500); // Wait for highlight to fade
+                  }, 200);
+                }, 500); // Wait for smooth scroll to complete
+                
                 found = true;
                 resolve();
               } else {
@@ -2165,8 +2205,28 @@
                     const retryElement = document.getElementById(`gm-msg-${messageId}`);
                     if (retryElement) {
                       console.log(`[GM+ Message Viewer] Found message element on retry`);
-                      highlightMessage(retryElement, messageId);
-                      retryElement.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                      viewport.scrollTo({
+                        top: Math.max(0, targetScrollTop),
+                        behavior: 'smooth'
+                      });
+                      setTimeout(() => {
+                        // Check visibility on retry too
+                        const rect = retryElement.getBoundingClientRect();
+                        const viewportRect = viewport.getBoundingClientRect();
+                        if (rect.top < viewportRect.top || rect.bottom > viewportRect.bottom) {
+                          retryElement.scrollIntoView({ 
+                            behavior: 'smooth', 
+                            block: 'center', 
+                            inline: 'nearest' 
+                          });
+                        }
+                        setTimeout(() => {
+                          highlightMessage(retryElement, messageId);
+                          setTimeout(() => {
+                            isNavigating = false;
+                          }, 1500);
+                        }, 200);
+                      }, 300);
                       found = true;
                       resolve();
                     } else if (retries > 0) {
@@ -2174,13 +2234,14 @@
                       retryFind();
                     } else {
                       console.warn(`[GM+ Message Viewer] Failed to find message element after retries`);
+                      isNavigating = false;
                       resolve();
                     }
                   }, 200);
                 };
                 retryFind();
               }
-            }, 100);
+            }, 150); // Small delay to allow DOM to update
           });
           
           break;
@@ -2377,21 +2438,27 @@
       const offsetY = startIndex * ITEM_HEIGHT;
       
       viewport.innerHTML = `
-        <div style="height: ${totalHeight}px; position: relative;">
-          <div style="transform: translateY(${offsetY}px); min-height: ${ITEM_HEIGHT * visibleMessages.length}px;">
+        <div style="height: ${totalHeight + 160}px; position: relative; padding: 40px 0;">
+          <div style="transform: translateY(${offsetY}px); min-height: ${ITEM_HEIGHT * visibleMessages.length}px; padding: 0 20px;">
             ${messagesHtml}
           </div>
         </div>
       `;
       
-      // If we're directly positioning to a target message, scroll to it
+      // If we're directly positioning to a target message, scroll to it with better centering
       if (targetMessageIndex !== null) {
         const relativeIndex = targetMessageIndex - startIndex;
         const targetScrollTop = offsetY + (relativeIndex * ITEM_HEIGHT);
         
-        // Center the target message in the viewport
-        const centeredScrollTop = targetScrollTop - (viewportHeight / 2) + (ITEM_HEIGHT / 2);
-        viewport.scrollTop = Math.max(0, centeredScrollTop);
+        // Center the target message in the viewport with padding
+        const centeredScrollTop = targetScrollTop - (viewportHeight / 2) + (ITEM_HEIGHT / 2) + 40;
+        
+        setTimeout(() => {
+          viewport.scrollTo({
+            top: Math.max(40, centeredScrollTop), // Ensure we don't scroll above padding
+            behavior: 'smooth'
+          });
+        }, 100);
       }
       
       // add click handlers for message details
@@ -2500,7 +2567,11 @@
         
         updateVirtualScroll(container);
         
-        viewport.addEventListener('scroll', () => updateVirtualScroll(container));
+        viewport.addEventListener('scroll', () => {
+          if (!isNavigating) {
+            updateVirtualScroll(container);
+          }
+        });
         
         // Check for pending jump message after loading
         if (pendingJumpMessageId) {
@@ -2834,8 +2905,8 @@
       .gm-chat-selector option{background:#2a2a2a;color:#fff}
       .gm-message-count{color:#888;font-size:12px;white-space:nowrap}
       .gm-messages-container{height:calc(100% - 120px);background:#292929;position:relative;overflow:hidden}
-      .gm-messages-viewport{height:100%;overflow-y:auto;padding:0 20px}
-      .gm-message-item{position:relative;border-bottom:1px solid rgba(0,0,0,0);padding:12px 0;transition:opacity 0.25s ease;color:#fff;font-size:14px;line-height:20px}
+      .gm-messages-viewport{height:100%;overflow-y:auto;padding:0;box-sizing:border-box}
+      .gm-message-item{position:relative;border-bottom:1px solid rgba(0,0,0,0);padding:12px 20px;transition:opacity 0.25s ease;color:#fff;font-size:14px;line-height:20px;min-height:60px;box-sizing:border-box}
       .gm-message-item:hover{background:rgba(255,255,255,0.02)}
       .gm-message-item.deleted{opacity:0.5}
       .gm-message-header{display:flex;align-items:center;gap:12px;margin-bottom:8px}
