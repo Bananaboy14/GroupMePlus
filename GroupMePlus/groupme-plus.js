@@ -1,5 +1,6 @@
 (() => {
   'use strict';
+  /* global LZString */
 
   // inject the page script to intercept API calls
   const injectPageScript = () => {
@@ -36,26 +37,15 @@
     const l = document.createElement('link');
     l.rel = 'stylesheet';
     l.href = href;
-    l.onerror = (error) => {
-      console.error(`[GM+ Font] CSS failed to load: ${href}`, error);
-      if (href.includes('fonts.googleapis.com')) {
-        console.warn('[GM+ Font] Google Fonts blocked by CSP - check manifest.json content_security_policy');
-      }
-    };
-    l.onload = () => {
-      console.log(`[GM+ Font] CSS loaded successfully: ${href}`);
-    };
     document.head.appendChild(l);
   };
 
-  // IndexedDB cache
+  // IndexedDB cache module (restored)
   const Cache = (() => {
     if (!window.LZString) {
       console.warn('[GM+ Cache] LZString not available, cache disabled');
       return null;
     }
-
-    console.log('[GM+ Cache] Initializing cache system...');
 
     const DB_NAME = 'GMPlusCache';
     const VERSION = 3;
@@ -73,8 +63,8 @@
           s.createIndex('group_ts', ['group_id', 'created_at']);
         }
         if (!db.objectStoreNames.contains(EDITS)) {
-          const e = db.createObjectStore(EDITS, { keyPath: 'edit_id' });
-          e.createIndex('msg', 'message_id');
+          const eStore = db.createObjectStore(EDITS, { keyPath: 'edit_id' });
+          eStore.createIndex('msg', 'message_id');
         }
       };
       req.onsuccess = () => ok(req.result);
@@ -85,745 +75,307 @@
     const D = s => JSON.parse(LZString.decompressFromUTF16(s));
 
     const validateMessage = (msg) => {
-      if (!msg || typeof msg !== 'object') {
-        console.warn('[GM+ Cache] Invalid message object:', msg);
-        return false;
-      }
-      if (!msg.id || typeof msg.id !== 'string') {
-        console.warn('[GM+ Cache] Missing or invalid message ID:', msg.id, msg);
-        return false;
-      }
-      if (String(msg.id).includes('.')) {
-        console.warn('[GM+ Cache] Message ID contains dots:', msg.id);
-        return false;
-      }
-      if (!msg.created_at && !msg.text && !msg.attachments?.length) {
-        console.warn('[GM+ Cache] Message missing essential content:', {
-          created_at: msg.created_at,
-          text: msg.text,
-          attachments: msg.attachments?.length
-        }, msg);
-        return false;
-      }
+      if (!msg || typeof msg !== 'object') return false;
+      if (!msg.id || typeof msg.id !== 'string') return false;
+      if (String(msg.id).includes('.')) return false;
+      if (!msg.created_at && !msg.text && !msg.attachments?.length) return false;
       return true;
     };
 
     async function store(batch) {
-      if (!batch || typeof batch !== 'object') {
-        console.warn('[GM+ Cache] Invalid batch object:', batch);
-        return;
-      }
-      
-      const allMessages = Object.values(batch);
-  // Filter and store valid messages
-  const messages = Object.values(batch).filter(validateMessage);
-  if (messages.length === 0) return;
-
+      if (!batch || typeof batch !== 'object') return;
+      const messages = Object.values(batch).filter(validateMessage);
+      if (!messages.length) return;
       try {
         const db = await open();
         const tx = db.transaction([STORE, EDITS], 'readwrite');
         const st = tx.objectStore(STORE);
         const eh = tx.objectStore(EDITS);
-
-        const messageIds = messages.map(m => m.id);
-        const existingMessages = new Map();
-        
-  // Identify existing messages
-        
-        await Promise.all(messageIds.map(id => 
-          new Promise((resolve, reject) => {
-            const req = st.get(id);
-            req.onsuccess = () => {
-              if (req.result) {
-                existingMessages.set(id, req.result);
-                console.log(`[GM+ Cache] Found existing message: ${id}`);
-              }
-              resolve();
-            };
-            req.onerror = () => reject(req.error);
-          })
-        ));
-
-  // Prepare put and edit operations
-
-        const putPromises = [];
-        const editPromises = [];
-        let newCount = 0;
-        let editCount = 0;
-
+        const existing = new Map();
+        await Promise.all(messages.map(m => new Promise((res, rej) => {
+          const r = st.get(m.id);
+          r.onsuccess = () => { if (r.result) existing.set(m.id, r.result); res(); };
+          r.onerror = () => rej(r.error);
+        })));
+        let newCount = 0, editCount = 0;
         for (const m of messages) {
-          const existing = existingMessages.get(m.id);
-          
-          if (!existing) {
-            console.log(`[GM+ Cache] Message ${m.id} is new, will store`);
-            putPromises.push(
-              new Promise((resolve, reject) => {
-                const req = st.put({
-                  id: m.id,
-                  group_id: m.group_id,
-                  created_at: m.created_at,
-                  data: C(m),
-                  stored_at: Date.now()
-                });
-                req.onsuccess = () => resolve(req.result);
-                req.onerror = () => reject(req.error);
-              })
-            );
-            newCount++;
-          } else {
-            console.log(`[GM+ Cache] Message ${m.id} already exists, checking for edits`);
-            const old = D(existing.data);
-            if (old.text !== m.text && old.text && m.text && 
-                old.text.trim() !== m.text.trim()) {
-              
-              console.log(`[GM+ Cache] Message ${m.id} has been edited`);
-              editPromises.push(
-                new Promise((resolve, reject) => {
-                  const req = eh.put({
-                    edit_id: `${m.id}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-                    message_id: m.id,
-                    original_text: old.text,
-                    new_text: m.text,
-                    edit_timestamp: Date.now(),
-                    original_updated_at: old.updated_at,
-                    new_updated_at: m.updated_at
-                  });
-                  req.onsuccess = () => resolve(req.result);
-                  req.onerror = () => reject(req.error);
-                })
-              );
-              
-              putPromises.push(
-                new Promise((resolve, reject) => {
-                  const req = st.put({
-                    id: m.id,
-                    group_id: m.group_id,
-                    created_at: m.created_at,
-                    data: C(m),
-                    updated_at: Date.now()
-                  });
-                  req.onsuccess = () => resolve(req.result);
-                  req.onerror = () => reject(req.error);
-                })
-              );
-              editCount++;
+          const prev = existing.get(m.id);
+            if (!prev) {
+              await new Promise((res, rej) => {
+                const r = st.put({ id: m.id, group_id: m.group_id, created_at: m.created_at, data: C(m), stored_at: Date.now() });
+                r.onsuccess = res; r.onerror = () => rej(r.error);
+              });
+              newCount++;
             } else {
-              console.log(`[GM+ Cache] Message ${m.id} unchanged, skipping`);
+              const old = D(prev.data);
+              if (old.text !== m.text && old.text && m.text && old.text.trim() !== m.text.trim()) {
+                await new Promise((res, rej) => {
+                  const r = eh.put({ edit_id: `${m.id}_${Date.now()}_${Math.random().toString(36).slice(2)}`, message_id: m.id, original_text: old.text, new_text: m.text, edit_timestamp: Date.now(), original_updated_at: old.updated_at, new_updated_at: m.updated_at });
+                  r.onsuccess = res; r.onerror = () => rej(r.error);
+                });
+                await new Promise((res, rej) => {
+                  const r = st.put({ id: m.id, group_id: m.group_id, created_at: m.created_at, data: C(m), updated_at: Date.now() });
+                  r.onsuccess = res; r.onerror = () => rej(r.error);
+                });
+                editCount++;
+              }
             }
-          }
         }
-
-        console.log(`[GM+ Cache] About to execute ${putPromises.length} put operations and ${editPromises.length} edit operations`);
-        await Promise.all([...putPromises, ...editPromises]);
-        
-        console.log(`[GM+ Cache] Batch stored: ${newCount} new, ${editCount} edited`);
-        
-        return new Promise((resolve, reject) => {
-          tx.oncomplete = () => resolve({ stored: newCount, edited: editCount });
-          tx.onerror = () => reject(tx.error);
-        });
-      } catch (error) {
-        console.error('[GM+ Cache] Store error:', error);
-        throw error;
+        return { stored: newCount, edited: editCount };
+      } catch (e) {
+        console.error('[GM+ Cache] Store error:', e);
       }
     }
 
     const stats = async () => {
       try {
         const db = await open();
-        
-        const messageCount = await new Promise((resolve, reject) => {
-          const req = db.transaction(STORE).objectStore(STORE).count();
-          req.onsuccess = () => resolve(req.result);
-          req.onerror = () => reject(req.error);
-        });
-        
-        const editCount = await new Promise((resolve, reject) => {
-          const req = db.transaction(EDITS).objectStore(EDITS).count();
-          req.onsuccess = () => resolve(req.result);
-          req.onerror = () => reject(req.error);
-        });
-        
+        const messageCount = await new Promise((res, rej) => { const r = db.transaction(STORE).objectStore(STORE).count(); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
+        const editCount = await new Promise((res, rej) => { const r = db.transaction(EDITS).objectStore(EDITS).count(); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
         return { messages: messageCount, edits: editCount };
-      } catch (error) {
-        console.error('[GM+ Cache] Stats error:', error);
-        return { messages: 0, edits: 0 };
-      }
+      } catch (e) { return { messages: 0, edits: 0 }; }
     };
 
     const all = async () => {
       try {
         const db = await open();
         const out = [];
-        
-        return new Promise((resolve, reject) => {
-          const tx = db.transaction(STORE);
-          const cursor = tx.objectStore(STORE).openCursor();
-          
-          cursor.onsuccess = (event) => {
-            const cur = event.target.result;
-            if (!cur) {
-              resolve(out);
-              return;
-            }
-            
-            try {
-              const decompressed = D(cur.value.data);
-              out.push(decompressed);
-            } catch (error) {
-              console.error('[GM+ Cache] Error decompressing data for ID:', cur.value.id, error);
-            }
-            
-            cur.continue();
+        return await new Promise((res, rej) => {
+          const curReq = db.transaction(STORE).objectStore(STORE).openCursor();
+          curReq.onsuccess = ev => {
+            const c = ev.target.result; if (!c) return res(out);
+            try { out.push(D(c.value.data)); } catch { }
+            c.continue();
           };
-          
-          cursor.onerror = () => reject(cursor.error);
-          tx.onerror = () => reject(tx.error);
+          curReq.onerror = () => rej(curReq.error);
         });
-      } catch (error) {
-        console.error('[GM+ Cache] All messages error:', error);
-        return [];
-      }
+      } catch { return []; }
     };
 
-    const search = async (query, options = {}) => {
+    const getByGroup = async (groupId) => {
+      if (!groupId) return [];
       try {
         const db = await open();
-        const results = [];
-        const {
-          limit = 100,
-          groupId = null,
-          userId = null,
-          dateFrom = null,
-          dateTo = null,
-          hasAttachments = null,
-          caseSensitive = false,
-          fullWord = false
-        } = options;
-        
-        return new Promise((resolve, reject) => {
-          const tx = db.transaction(STORE);
-          const store = tx.objectStore(STORE);
-          let cursor;
-          let processedCount = 0;
-          
-          // Use index if filtering by group
-          if (groupId) {
-            cursor = store.index('group_id').openCursor(IDBKeyRange.only(groupId));
-          } else {
-            cursor = store.openCursor();
-          }
-          
-          cursor.onsuccess = (event) => {
-            const cur = event.target.result;
-            if (!cur || results.length >= limit) {
-              console.log(`[GM+ Search Debug] Processed ${processedCount} total messages, found ${results.length} matching results`);
-              resolve(results);
-              return;
-            }
-            
-            processedCount++;
-            
-            try {
-              const msg = D(cur.value.data);
-              let matches = true;
-              
-              if (query && query.trim()) {
-                const searchTerm = caseSensitive ? query : query.toLowerCase();
-                const searchText = caseSensitive ? (msg.text || '') : (msg.text || '').toLowerCase();
-                const searchName = caseSensitive ? (msg.name || '') : (msg.name || '').toLowerCase();
-                
-                if (fullWord) {
-                  const regex = new RegExp(`\\b${searchTerm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, caseSensitive ? 'g' : 'gi');
-                  matches = matches && (
-                    regex.test(msg.text || '') ||
-                    regex.test(msg.name || '')
-                  );
-                } else {
-                  matches = matches && (
-                    searchText.includes(searchTerm) ||
-                    searchName.includes(searchTerm)
-                  );
-                }
-              }
-              
-              if (userId && matches) {
-                matches = msg.user_id === userId || msg.sender_id === userId;
-              }
-              
-              if (dateFrom && matches) {
-                matches = msg.created_at >= dateFrom;
-              }
-              if (dateTo && matches) {
-                matches = msg.created_at <= dateTo;
-              }
-              
-              if (hasAttachments !== null && matches) {
-                matches = hasAttachments ? 
-                  (msg.attachments && msg.attachments.length > 0) :
-                  (!msg.attachments || msg.attachments.length === 0);
-              }
-              
-              if (matches) {
-                results.push(msg);
-              }
-            } catch (error) {
-              console.error('[GM+ Cache] Error processing search result:', error);
-            }
-            
-            cur.continue();
-          };
-          
-          cursor.onerror = () => reject(cursor.error);
-          tx.onerror = () => reject(tx.error);
+        const idx = db.transaction(STORE).objectStore(STORE).index('group_id');
+        const out = [];
+        return await new Promise((res, rej) => {
+          const req = idx.openCursor(IDBKeyRange.only(groupId));
+            req.onsuccess = ev => { const cur = ev.target.result; if (!cur) { out.sort((a,b)=> b.created_at - a.created_at); return res(out);} try { out.push(D(cur.value.data)); } catch {} cur.continue(); };
+            req.onerror = () => rej(req.error);
         });
-      } catch (error) {
-        console.error('[GM+ Cache] Search error:', error);
-        return [];
-      }
-    };
-
-    const getByGroup = async (groupId, limit = 1000000) => {
-      try {
-        const db = await open();
-        return new Promise((resolve, reject) => {
-          const tx = db.transaction(STORE);
-          const index = tx.objectStore(STORE).index('group_ts');
-          const range = IDBKeyRange.bound([groupId, 0], [groupId, Date.now()]);
-          const results = [];
-          
-          const cursor = index.openCursor(range, 'prev');
-          
-          cursor.onsuccess = (event) => {
-            const cur = event.target.result;
-            if (!cur || results.length >= limit) {
-              resolve(results);
-              return;
-            }
-            
-            try {
-              const msg = D(cur.value.data);
-              results.push(msg);
-            } catch (error) {
-              console.error('[GM+ Cache] Error decompressing message:', error);
-            }
-            
-            cur.continue();
-          };
-          
-          cursor.onerror = () => reject(cursor.error);
-        });
-      } catch (error) {
-        console.error('[GM+ Cache] GetByGroup error:', error);
-        return [];
-      }
+      } catch (e) { console.warn('[GM+ Cache] getByGroup error', e); return []; }
     };
 
     const getEditHistory = async (messageId) => {
+      if (!messageId) return [];
       try {
         const db = await open();
-        return new Promise((resolve, reject) => {
-          const tx = db.transaction(EDITS);
-          const index = tx.objectStore(EDITS).index('msg');
-          const results = [];
-          
-          const cursor = index.openCursor(IDBKeyRange.only(messageId));
-          
-          cursor.onsuccess = (event) => {
-            const cur = event.target.result;
-            if (!cur) {
-              results.sort((a, b) => a.edit_timestamp - b.edit_timestamp);
-              resolve(results);
-              return;
-            }
-            
-            results.push(cur.value);
-            cur.continue();
-          };
-          
-          cursor.onerror = () => reject(cursor.error);
+        const idx = db.transaction(EDITS).objectStore(EDITS).index('msg');
+        const out = [];
+        return await new Promise((res, rej) => {
+          const req = idx.openCursor(IDBKeyRange.only(messageId));
+          req.onsuccess = ev => { const cur = ev.target.result; if (!cur) return res(out); out.push(cur.value); cur.continue(); };
+          req.onerror = () => rej(req.error);
         });
-      } catch (error) {
-        console.error('[GM+ Cache] Edit history error:', error);
-        return [];
-      }
-    };
-
-    const cleanup = async (options = {}) => {
-      try {
-        const db = await open();
-        const {
-          olderThanDays = 30,
-          keepEditHistory = true,
-          dryRun = false
-        } = options;
-        
-        const cutoffTime = Date.now() - (olderThanDays * 24 * 60 * 60 * 1000);
-        let deletedCount = 0;
-        let checkedCount = 0;
-        
-        return new Promise((resolve, reject) => {
-          const tx = db.transaction([STORE, ...(keepEditHistory ? [] : [EDITS])], dryRun ? 'readonly' : 'readwrite');
-          const store = tx.objectStore(STORE);
-          const cursor = store.openCursor();
-          
-          cursor.onsuccess = (event) => {
-            const cur = event.target.result;
-            if (!cur) {
-              resolve({ deleted: deletedCount, checked: checkedCount });
-              return;
-            }
-            
-            try {
-              const msg = D(cur.value.data);
-              checkedCount++;
-              
-              if (msg.created_at && msg.created_at * 1000 < cutoffTime) {
-                if (!dryRun) {
-                  cur.delete();
-                }
-                deletedCount++;
-              }
-            } catch (error) {
-              console.warn('[GM+ Cache] Cleanup: Error processing message:', error);
-              if (!dryRun) {
-                cur.delete();
-                deletedCount++;
-              }
-            }
-            
-            cur.continue();
-          };
-          
-          cursor.onerror = () => reject(cursor.error);
-          tx.onerror = () => reject(tx.error);
-        });
-      } catch (error) {
-        console.error('[GM+ Cache] Cleanup error:', error);
-        throw error;
-      }
+      } catch (e) { console.warn('[GM+ Cache] getEditHistory error', e); return []; }
     };
 
     const validate = async () => {
+      const result = { valid: 0, invalid: 0, issues: [], totalSize: 0 };
       try {
         const db = await open();
-        let validCount = 0;
-        let invalidCount = 0;
-        let compressedSize = 0;
-        const issues = [];
-        
-        return new Promise((resolve, reject) => {
-          const tx = db.transaction(STORE);
-          const cursor = tx.objectStore(STORE).openCursor();
-          
-          cursor.onsuccess = (event) => {
-            const cur = event.target.result;
-            if (!cur) {
-              resolve({
-                valid: validCount,
-                invalid: invalidCount,
-                totalSize: compressedSize,
-                issues: issues.slice(0, 10)
-              });
-              return;
-            }
-            
+        const store = db.transaction(STORE).objectStore(STORE);
+        await new Promise((res, rej) => {
+          const req = store.openCursor();
+          req.onsuccess = ev => {
+            const cur = ev.target.result; if (!cur) return res();
+            const rec = cur.value; const raw = rec.data; result.totalSize += (raw?.length || 0) * 2; // estimate for UTF-16
             try {
-              compressedSize += cur.value.data.length * 2;
-              const msg = D(cur.value.data);
-              
-              if (!msg.id || !msg.created_at) {
-                issues.push(`Missing required fields: ${cur.key}`);
-                invalidCount++;
-              } else {
-                validCount++;
-              }
-            } catch (error) {
-              issues.push(`Decompression failed: ${cur.key}`);
-              invalidCount++;
-            }
-            
+              const msg = D(raw);
+              if (validateMessage(msg)) result.valid++; else { result.invalid++; result.issues.push(`Invalid structure for id ${rec.id}`); }
+            } catch (e) { result.invalid++; result.issues.push(`Decompression error for id ${rec.id}: ${e.message}`); }
             cur.continue();
           };
-          
-          cursor.onerror = () => reject(cursor.error);
+          req.onerror = () => rej(req.error);
         });
-      } catch (error) {
-        console.error('[GM+ Cache] Validation error:', error);
-        throw error;
+      } catch (e) {
+        result.issues.push('Validation failed: ' + e.message);
       }
+      return result;
     };
 
-    return { store, stats, all, search, getByGroup, getEditHistory, cleanup, validate, open };
+    const cleanup = async ({ olderThanDays = 30, dryRun = true } = {}) => {
+      const secondsCutoff = Date.now()/1000 - olderThanDays * 86400;
+      let deleted = 0; const sample = [];
+      try {
+        const db = await open();
+        const store = db.transaction(STORE, dryRun ? 'readonly' : 'readwrite').objectStore(STORE);
+        await new Promise((res, rej) => {
+          const req = store.openCursor();
+          req.onsuccess = ev => {
+            const cur = ev.target.result; if (!cur) return res();
+            try {
+              const msg = D(cur.value.data);
+              if (msg.created_at && msg.created_at < secondsCutoff) {
+                deleted++; if (sample.length < 5) sample.push(msg.id);
+                if (!dryRun) cur.delete();
+              }
+            } catch {}
+            cur.continue();
+          };
+          req.onerror = () => rej(req.error);
+        });
+      } catch (e) {
+        return { deleted: 0, error: e.message, sample: [] };
+      }
+      return { deleted, dryRun, sample };
+    };
+
+  const search = async (query, options = {}) => {
+      try {
+        const db = await open();
+        const results = [];
+        const { limit = 100, groupId = null, userId = null, dateFrom = null, dateTo = null, hasAttachments = null, caseSensitive = false, fullWord = false } = options;
+        return await new Promise((resolve, reject) => {
+          const store = db.transaction(STORE).objectStore(STORE);
+          const cursor = groupId ? store.index('group_id').openCursor(IDBKeyRange.only(groupId)) : store.openCursor();
+          cursor.onsuccess = ev => {
+            const cur = ev.target.result;
+            if (!cur || results.length >= limit) return resolve(results);
+            try {
+              const msg = D(cur.value.data);
+              let match = true;
+              if (query && query.trim()) {
+                const term = caseSensitive ? query : query.toLowerCase();
+                const text = caseSensitive ? (msg.text || '') : (msg.text || '').toLowerCase();
+                const name = caseSensitive ? (msg.name || '') : (msg.name || '').toLowerCase();
+                if (fullWord) {
+                  const regex = new RegExp(`\\b${term.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')}\\b`, caseSensitive ? 'g' : 'gi');
+                  match = regex.test(text) || regex.test(name);
+                } else {
+                  match = text.includes(term) || name.includes(term);
+                }
+              }
+              if (userId && match) match = (msg.user_id === userId || msg.sender_id === userId);
+              if (dateFrom && match) match = msg.created_at >= dateFrom;
+              if (dateTo && match) match = msg.created_at <= dateTo;
+              if (hasAttachments !== null && match) match = hasAttachments ? (msg.attachments && msg.attachments.length > 0) : (!msg.attachments || !msg.attachments.length);
+              if (match) results.push(msg);
+            } catch {}
+            cur.continue();
+          };
+          cursor.onerror = () => reject(cursor.error);
+        });
+      } catch { return []; }
+    };
+
+  return { store, stats, all, getByGroup, getEditHistory, validate, cleanup, search, open };
   })();
 
   console.log('[GM+ Cache] Cache system initialized:', Cache ? 'enabled' : 'disabled');
-
+  // Runtime safety: if an older build returned a Cache object without newer helpers, polyfill them.
+  if (Cache) {
+    const polyfillValidate = async () => {
+      try {
+        const db = await Cache.open();
+        const store = db.transaction('messages').objectStore('messages');
+        let valid = 0, invalid = 0, totalSize = 0; const issues = [];
+        await new Promise((res, rej) => {
+          const cur = store.openCursor();
+          cur.onsuccess = e => { const c = e.target.result; if (!c) return res(); try { totalSize += (c.value.data?.length||0)*2; JSON.parse(LZString.decompressFromUTF16(c.value.data)); valid++; } catch (err) { invalid++; issues.push('Bad record '+c.key); } c.continue(); };
+          cur.onerror = () => rej(cur.error);
+        });
+        return { valid, invalid, totalSize, issues };
+      } catch (e) { return { valid:0, invalid:0, totalSize:0, issues:['Validate failed '+e.message] }; }
+    };
+    if (typeof Cache.validate !== 'function') Cache.validate = polyfillValidate;
+    if (typeof Cache.cleanup !== 'function') Cache.cleanup = async ({ olderThanDays = 30, dryRun = true } = {}) => {
+      try { const cutoff = Date.now()/1000 - olderThanDays*86400; const db = await Cache.open(); const store = db.transaction('messages', dryRun?'readonly':'readwrite').objectStore('messages'); let deleted=0; await new Promise((res,rej)=>{ const cur=store.openCursor(); cur.onsuccess = e=>{ const c=e.target.result; if(!c) return res(); try { const msg = JSON.parse(LZString.decompressFromUTF16(c.value.data)); if (msg.created_at && msg.created_at < cutoff) { if(!dryRun) c.delete(); deleted++; } } catch {} c.continue(); }; cur.onerror=()=>rej(cur.error); }); return { deleted, dryRun }; } catch(e){ return { deleted:0, dryRun, error:e.message }; } };
+    if (typeof Cache.getByGroup !== 'function') Cache.getByGroup = async (groupId) => { const all = await Cache.all(); return all.filter(m=>m.group_id===groupId).sort((a,b)=>b.created_at-a.created_at); };
+    if (typeof Cache.getEditHistory !== 'function') Cache.getEditHistory = async () => [];
+    window.GMPlusCache = Cache; // expose for debugging
+  }
+  // (Removed duplicate legacy cache helper implementations)
+  // SmartFetch module (restored)
   const SmartFetch = (() => {
-    if (!Cache) {
-      console.warn('[GM+ SmartFetch] Cache not available, smart fetching disabled');
-      return null;
-    }
+    if (!Cache) return null;
 
     const getCacheBoundaries = async (chatId, isDM = false) => {
       try {
-        console.log(`[GM+ SmartFetch] Analyzing cache boundaries for ${isDM ? 'DM' : 'group'} ${chatId}`);
-        
         let cached = [];
+        const all = await Cache.all();
         if (isDM) {
-          const allMessages = await Cache.all();
-          cached = allMessages.filter(msg => {
-            return (msg.is_dm || msg.conversation_id) && (
-              msg.user_id === chatId || 
-              msg.sender_id === chatId ||
-              msg.dm_other_user_id === chatId ||
-              (msg.conversation_id && msg.conversation_id.includes(chatId))
-            );
-          });
+          cached = all.filter(m => (m.is_dm || m.conversation_id) && (
+            m.user_id === chatId || m.sender_id === chatId || m.dm_other_user_id === chatId || (m.conversation_id && m.conversation_id.includes(chatId))));
         } else {
-          try {
-            const allMsgs = await Cache.all();
-            cached = allMsgs.filter(msg => msg.group_id === chatId);
-          } catch (e) {
-            console.error('[GM+ SmartFetch] Error loading full cache for group boundaries:', e);
-            cached = [];
-          }
+          cached = all.filter(m => m.group_id === chatId);
         }
-
-        if (!cached.length) {
-          console.log(`[GM+ SmartFetch] No cached messages found`);
-          return { newest: null, oldest: null, count: 0, hasCache: false };
-        }
-
-        const sorted = cached.sort((a, b) => b.created_at - a.created_at);
-        const newest = sorted[0];
-        const oldest = sorted[sorted.length - 1];
-
-        console.log(`[GM+ SmartFetch] Cache boundaries: ${cached.length} messages from ${new Date(oldest.created_at * 1000).toLocaleDateString()} to ${new Date(newest.created_at * 1000).toLocaleDateString()}`);
-        
+        if (!cached.length) return { newest: null, oldest: null, count: 0, hasCache: false };
+        cached.sort((a,b) => b.created_at - a.created_at);
+        const newest = cached[0];
+        const oldest = cached[cached.length-1];
         return {
           newest,
-          oldest, 
+          oldest,
+            // convenience date objects for UI (may be undefined if timestamps missing)
+          newestDate: newest?.created_at ? new Date(newest.created_at * 1000) : null,
+          oldestDate: oldest?.created_at ? new Date(oldest.created_at * 1000) : null,
           count: cached.length,
-          hasCache: true,
-          newestDate: new Date(newest.created_at * 1000),
-          oldestDate: new Date(oldest.created_at * 1000)
+          hasCache: true
         };
-      } catch (error) {
-        console.error('[GM+ SmartFetch] Error analyzing cache boundaries:', error);
+      } catch (e) {
+        console.error('[GM+ SmartFetch] Boundary error:', e);
         return { newest: null, oldest: null, count: 0, hasCache: false };
       }
     };
 
-    const fetchSince = async (type, chatId, sinceMessageId, sinceTimestamp) => {
+    const fetchSince = async (type, chatId, sinceId, sinceTs) => {
       const headers = getAuthHeaders();
-      let beforeId = null;
-      let newMessages = [];
-      let totalFetched = 0;
-      let batchCount = 0;
-      let retryCount = 0;
-      const maxRetries = 5;
-
-      console.log(`[GM+ SmartFetch] Fetching new messages since ID ${sinceMessageId} (${new Date(sinceTimestamp * 1000).toLocaleString()})`);
-
-      try {
-        while (true) {
-          batchCount++;
-          let url = '';
-          if (type === 'group') {
-            url = `https://api.groupme.com/v3/groups/${chatId}/messages?acceptFiles=1&limit=100${beforeId ? `&before_id=${beforeId}` : ''}`;
-          } else {
-            url = `https://api.groupme.com/v3/direct_messages?acceptFiles=1&limit=100&other_user_id=${chatId}${beforeId ? `&before_id=${beforeId}` : ''}`;
+      let beforeId = null, newMessages = [], retry = 0; const maxRetry = 5; let batches = 0;
+      while (true) {
+        batches++;
+        const base = type === 'group'
+          ? `https://api.groupme.com/v3/groups/${chatId}/messages?acceptFiles=1&limit=100`
+          : `https://api.groupme.com/v3/direct_messages?acceptFiles=1&limit=100&other_user_id=${chatId}`;
+        const url = base + (beforeId ? `&before_id=${beforeId}` : '');
+        try {
+          const r = await fetch(url, { headers, credentials: 'omit' });
+          if (!r.ok) {
+            if (r.status === 429 && retry < maxRetry) { retry++; await new Promise(rs => setTimeout(rs, 500 * retry)); continue; }
+            break;
           }
-
-          try {
-            console.log(`[GM+ SmartFetch] Batch ${batchCount}: ${url}`);
-            const resp = await fetch(url, { headers, credentials: 'omit' });
-            
-            if (!resp.ok) {
-              if (resp.status === 429) {
-                retryCount++;
-                if (retryCount > maxRetries) {
-                  console.error(`[GM+ SmartFetch] Rate limit exceeded after ${maxRetries} retries`);
-                  throw new Error(`Rate limit exceeded after ${maxRetries} retries`);
-                }
-                
-                const backoffTime = Math.pow(1.5, retryCount) * 1000;
-                console.warn(`[GM+ SmartFetch] Rate limited (429), retrying in ${backoffTime}ms (attempt ${retryCount}/${maxRetries})`);
-                await new Promise(resolve => setTimeout(resolve, backoffTime));
-                batchCount--;
-                continue;
-              } else if (resp.status === 304) {
-                console.log(`[GM+ SmartFetch] No more messages (304)`);
-                break;
-              } else {
-                console.warn(`[GM+ SmartFetch] API request failed: ${resp.status} ${resp.statusText}`);
-                throw new Error(`API request failed: ${resp.status} ${resp.statusText}`);
-              }
-            }
-
-            retryCount = 0;
-
-            const jd = await resp.json();
-            let msgs = [];
-            
-            if (type === 'group') {
-              msgs = (jd.response && jd.response.messages) || [];
-            } else {
-              msgs = (jd.response && jd.response.direct_messages) || [];
-            }
-
-            if (!msgs.length) {
-              console.log(`[GM+ SmartFetch] No more messages in batch ${batchCount}`);
-              break;
-            }
-
-            totalFetched += msgs.length;
-            console.log(`[GM+ SmartFetch] Batch ${batchCount}: ${msgs.length} messages (total: ${totalFetched})`);
-
-            let hitBoundary = false;
-            let newBatchMessages = [];
-
-            for (const msg of msgs) {
-              if (msg.id === sinceMessageId || msg.created_at <= sinceTimestamp) {
-                console.log(`[GM+ SmartFetch] Hit cache boundary at message ${msg.id}`);
-                hitBoundary = true;
-                break;
-              }
-              newBatchMessages.push(msg);
-            }
-
-            newMessages.push(...newBatchMessages);
-
-            if (hitBoundary) {
-              console.log(`[GM+ SmartFetch] Reached cache boundary. Found ${newMessages.length} new messages.`);
-              break;
-            }
-
-            beforeId = msgs[msgs.length - 1].id;
-
-            if (batchCount > 500) {
-              console.warn(`[GM+ SmartFetch] Hit safety limit of 500 batches`);
-              break;
-            }
-
-            await new Promise(resolve => setTimeout(resolve, 10));
-            
-          } catch (error) {
-            if (error.name === 'TypeError' && error.message.includes('fetch')) {
-              retryCount++;
-              if (retryCount > maxRetries) {
-                console.error(`[GM+ SmartFetch] Network error after ${maxRetries} retries:`, error);
-                throw error;
-              }
-              
-              const backoffTime = Math.pow(1.5, retryCount) * 1000;
-              console.warn(`[GM+ SmartFetch] Network error, retrying in ${backoffTime}ms (attempt ${retryCount}/${maxRetries}):`, error.message);
-              await new Promise(resolve => setTimeout(resolve, backoffTime));
-              batchCount--;
-              continue;
-            } else {
-              throw error;
-            }
+          retry = 0;
+          const jd = await r.json();
+            const msgs = type === 'group' ? (jd.response?.messages || []) : (jd.response?.direct_messages || []);
+          if (!msgs.length) break;
+          for (const m of msgs) {
+            if (m.id === sinceId || m.created_at <= sinceTs) { beforeId = null; break; }
+            newMessages.push(m);
           }
+          if (msgs.length) beforeId = msgs[msgs.length-1].id; else break;
+          if (beforeId === null) break;
+          if (batches > 500) break;
+          await new Promise(rs => setTimeout(rs, 10));
+        } catch (e) {
+          if (retry++ > maxRetry) break; await new Promise(rs => setTimeout(rs, 500 * retry));
         }
-
-        console.log(`[GM+ SmartFetch] Incremental fetch complete: ${newMessages.length} new messages in ${batchCount} batches`);
-        return newMessages;
-
-      } catch (error) {
-        console.error('[GM+ SmartFetch] Error in fetchSince:', error);
-        throw error;
       }
+      return newMessages;
     };
 
-    // Main smart fetch function
-    const smartFetch = async (type, chatId, progressCallback) => {
+    const smartFetch = async (type, chatId, progress) => {
       try {
-        const boundaries = await getCacheBoundaries(chatId, type === 'dm');
-        
-        if (!boundaries.hasCache) {
-          console.log(`[GM+ SmartFetch] No cache found, falling back to full fetch`);
-          return { mode: 'full', boundaries };
-        }
-
-        console.log(`[GM+ SmartFetch] Found cache with ${boundaries.count} messages. Newest: ${boundaries.newestDate.toLocaleString()}`);
-        
-        // Step 1: Check for newer messages
-        if (progressCallback) {
-          progressCallback(`Checking for new messages since ${boundaries.newestDate.toLocaleDateString()}...`);
-        }
-
-        const newMessages = await fetchSince(type, chatId, boundaries.newest.id, boundaries.newest.created_at);
-        
-        let totalNewMessages = newMessages.length;
-        
-        if (newMessages.length > 0) {
-          // store new messages
-          const batch = Object.fromEntries(newMessages.map(m => [m.id, m]));
-          await Cache.store(batch);
-          console.log(`[GM+ SmartFetch] Stored ${newMessages.length} newer messages`);
-        }
-        
-        // check for older messages
-        if (progressCallback) {
-          progressCallback(`Checking for older messages before ${boundaries.oldestDate.toLocaleDateString()}...`);
-        }
-        
-        // fetch one batch of older messages to check for gaps
-        const headers = getAuthHeaders();
-        let olderUrl = '';
-        if (type === 'group') {
-          olderUrl = `https://api.groupme.com/v3/groups/${chatId}/messages?acceptFiles=1&limit=100&before_id=${boundaries.oldest.id}`;
-        } else {
-          olderUrl = `https://api.groupme.com/v3/direct_messages?acceptFiles=1&limit=100&other_user_id=${chatId}&before_id=${boundaries.oldest.id}`;
-        }
-        
-        try {
-          console.log(`[GM+ SmartFetch] Checking for older messages: ${olderUrl}`);
-          const olderResp = await fetch(olderUrl, { headers, credentials: 'omit' });
-          
-          let olderMessages = [];
-          if (olderResp.ok) {
-            const olderData = await olderResp.json();
-            if (type === 'group') {
-              olderMessages = (olderData.response && olderData.response.messages) || [];
-            } else {
-              olderMessages = (olderData.response && olderData.response.direct_messages) || [];
-            }
-          }
-          
-          if (olderMessages.length > 0) {
-            console.log(`[GM+ SmartFetch] Found ${olderMessages.length} older messages - cache has gaps. Falling back to full fetch for complete history.`);
-            return { mode: 'full', boundaries, reason: 'gaps_in_history' };
-          } else {
-            console.log(`[GM+ SmartFetch] No older messages found - cache appears complete.`);
-          }
-          
-        } catch (error) {
-          console.warn(`[GM+ SmartFetch] Could not check for older messages:`, error);
-        }
-        
-        if (totalNewMessages === 0) {
-          console.log(`[GM+ SmartFetch] No new messages found. Cache is up to date.`);
-          return { 
-            mode: 'incremental', 
-            newMessages: [], 
-            boundaries,
-            alreadyUpToDate: true 
-          };
-        }
-
-        return { 
-          mode: 'incremental', 
-          newMessages, 
-          boundaries,
-          alreadyUpToDate: false 
-        };
-
-      } catch (error) {
-        console.error('[GM+ SmartFetch] Error in smart fetch:', error);
-        return { mode: 'error', error, boundaries: null };
+        const bounds = await getCacheBoundaries(chatId, type === 'dm');
+        if (!bounds.hasCache) return { mode: 'full', boundaries: bounds };
+        if (progress) progress('Checking for new messages...');
+        const newer = await fetchSince(type, chatId, bounds.newest.id, bounds.newest.created_at);
+        if (!newer.length) return { mode: 'incremental', newMessages: [], boundaries: bounds, alreadyUpToDate: true };
+        const batch = Object.fromEntries(newer.map(m => [m.id, m]));
+        await Cache.store(batch);
+        return { mode: 'incremental', newMessages: newer, boundaries: bounds, alreadyUpToDate: false };
+      } catch (e) {
+        console.error('[GM+ SmartFetch] smartFetch error:', e);
+        return { mode: 'error', error: e, boundaries: null };
       }
     };
 
@@ -1234,11 +786,9 @@
         
       } catch (apiError) {
         console.warn('[GM+ Context] API context loading failed:', apiError);
-        // Continue with existing cache
       }
       
-      // Now proceed with navigation
-      const delay = 1500; // Give a bit more time for any context loading
+      const delay = 1500;
       setTimeout(() => {
         findAndScrollToMessage(messageId, groupId, userIdOrConversationId);
       }, delay);
@@ -1257,10 +807,8 @@
         groupId, otherUserId, conversationId
       });
       
-      // Open the Message Viewer
       await MessageViewer.show();
       
-      // Determine the chat ID for the dropdown
       const chatId = groupId || otherUserId || conversationId;
       
       if (!chatId) {
@@ -1704,7 +1252,6 @@
       const handleResize = () => repositionModal(modal);
       window.addEventListener('resize', handleResize);
       
-      // Store cleanup functions in modal instance
       modalInstance.cleanup = () => {
         window.removeEventListener('resize', handleResize);
         observer.disconnect();
@@ -1750,15 +1297,12 @@
         close: null
       };
       
-      // Set up close functionality
       const closeModal = () => {
-        // Remove from stack
         const index = modalStack.indexOf(modalInstance);
         if (index > -1) {
           modalStack.splice(index, 1);
         }
         
-        // Clean up observers and event listeners
         if (modalInstance.cleanup) {
           modalInstance.cleanup();
         }
@@ -1780,7 +1324,6 @@
       
       const handleEscape = (e) => {
         if (e.key === 'Escape') {
-          // Only close the topmost modal
           if (modalStack.length > 0 && modalStack[modalStack.length - 1] === modalInstance) {
             closeModal();
           }
@@ -1788,7 +1331,6 @@
       };
       
       const show = () => {
-        // Add to stack
         modalStack.push(modalInstance);
         
         document.body.appendChild(overlay);
@@ -1802,7 +1344,6 @@
       
       modalInstance.show = show;
       
-      // Clean up event listener when modal is closed
       const originalClose = modalInstance.close;
       modalInstance.close = () => {
         document.removeEventListener('keydown', handleEscape);
@@ -1813,7 +1354,6 @@
     };
 
     const close = () => {
-      // Close the topmost modal
       if (modalStack.length > 0) {
         const topModal = modalStack[modalStack.length - 1];
         topModal.close();
@@ -1821,7 +1361,6 @@
     };
 
     const closeAll = () => {
-      // Close all modals
       while (modalStack.length > 0) {
         const modal = modalStack[modalStack.length - 1];
         modal.close();
@@ -2044,220 +1583,26 @@
     };
     
     const navigateToMessage = async (messageId) => {
-      console.log(`[GM+ Message Viewer] Navigating to message ${messageId}`);
-      console.log(`[GM+ Message Viewer] currentModal:`, currentModal);
-      
-      isNavigating = false;
-      
-      if (scrollToMessage(messageId)) {
-        console.log(`[GM+ Message Viewer] Message ${messageId} found in current view`);
+      if (!allMessages.length) return;
+      const container = currentModal?.modal.querySelector('.gm-messages-container');
+      if (!container) return;
+      const index = allMessages.findIndex(m => m.id === messageId);
+      if (index === -1) {
+        Modal.alert('Message Not Found', 'Message not present in loaded cache for this chat.', 'error');
         return;
       }
-      
-      const chunkSize = 100;
-      let found = false;
-      
-      let container = currentModal?.modal.querySelector('.gm-messages-container');
-      if (!container) {
-        console.log(`[GM+ Message Viewer] Primary container (.gm-messages-container) not found, trying alternatives...`);
-        container = currentModal?.modal.querySelector('.gm-messages-viewport');
-        if (!container) {
-          container = currentModal?.modal.querySelector('.gm-message-viewer-container');
-          if (!container) {
-            container = currentModal?.modal.querySelector('.gm-message-viewer');
-            if (!container) {
-              container = document.querySelector('.gm-messages-container');
-              if (!container) {
-                container = document.querySelector('.gm-messages-viewport');
-              }
-            }
-          }
+      isNavigating = true;
+      // Use unified virtualization path (preserves modal padding/styles)
+      updateVirtualScroll(container, index);
+      setTimeout(() => {
+        const el = document.getElementById(`gm-msg-${messageId}`);
+        if (el) {
+          // Single smooth center scroll; no persistent locking
+          el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          setTimeout(() => highlightMessage(el, messageId), 300);
         }
-      }
-      
-      console.log(`[GM+ Message Viewer] Found container:`, container);
-      console.log(`[GM+ Message Viewer] Container classList:`, container?.classList);
-      
-      if (!container) {
-        console.error('[GM+ Message Viewer] No suitable container found');
-        console.log('[GM+ Message Viewer] Available modal elements:', currentModal?.modal.querySelectorAll('*'));
-        return;
-      }
-      
-      console.log(`[GM+ Message Viewer] Starting brute-force search through ${allMessages.length} messages`);
-      console.log(`[GM+ Message Viewer] Target message ID: ${messageId}`);
-      
-      for (let startIndex = 0; startIndex < allMessages.length && !found; startIndex += chunkSize) {
-        const endIndex = Math.min(startIndex + chunkSize, allMessages.length);
-        console.log(`[GM+ Message Viewer] Loading chunk ${startIndex}-${endIndex} (${endIndex - startIndex} messages)`);
-        
-        const chunkMessages = allMessages.slice(startIndex, endIndex);
-        console.log(`[GM+ Message Viewer] Chunk message IDs:`, chunkMessages.map(m => m.id).slice(0, 5), '...');
-        
-        currentContext = {
-          startIndex: startIndex,
-          endIndex: endIndex,
-          messages: chunkMessages
-        };
-        
-        console.log(`[GM+ Message Viewer] Updated currentContext:`, currentContext);
-        
-        const targetInChunk = currentContext.messages.find(msg => msg.id === messageId);
-        console.log(`[GM+ Message Viewer] Target in chunk ${startIndex}-${endIndex}:`, !!targetInChunk);
-        
-        if (targetInChunk) {
-          console.log(`[GM+ Message Viewer] Found target message in chunk ${startIndex}-${endIndex}`);
-          console.log(`[GM+ Message Viewer] Target message:`, targetInChunk);
-          
-          console.log(`[GM+ Message Viewer] Calling updateVirtualScroll...`);
-          
-          // Set navigation flag to prevent scroll interference
-          isNavigating = true;
-          
-          let viewport = container.querySelector('.gm-messages-viewport');
-          if (!viewport) {
-            console.warn('[GM+ Message Viewer] Viewport not found, creating one');
-            viewport = document.createElement('div');
-            viewport.className = 'gm-messages-viewport';
-            viewport.style.cssText = 'height: 95vh; overflow-y: auto; position: relative; font-family: Poppins, sans-serif;';
-            container.appendChild(viewport);
-          }
-          
-          // Ensure the container and modal body allow proper overflow and visibility
-          const modalBody = currentModal?.modal.querySelector('.gm-modal-body');
-          if (modalBody) {
-            modalBody.style.overflow = 'hidden'; // Keep modal body overflow hidden
-            modalBody.style.padding = '0';
-          }
-          container.style.overflow = 'hidden'; // Container should be hidden too
-          
-          visibleMessages = currentContext.messages;
-          const messagesHtml = visibleMessages.map((msg, i) => 
-            renderMessage(msg, currentContext.startIndex + i)
-          ).join('');
-          
-          // Add padding to ensure messages are fully visible with extra space
-          viewport.innerHTML = `
-            <div style="padding: 40px 20px; min-height: calc(100% + 80px);">
-              ${messagesHtml}
-            </div>
-          `;
-          
-          // Calculate the scroll position to center the target message with better visibility
-          const targetMessageIndex = currentContext.messages.findIndex(msg => msg.id === messageId);
-          // Add extra offset to account for padding and ensure message isn't cut off
-          const targetScrollTop = (targetMessageIndex * ITEM_HEIGHT) - (viewport.clientHeight / 2) + 80; // Add 80px for padding and spacing
-          
-          await new Promise((resolve) => {
-            setTimeout(() => {
-              const messageElement = document.getElementById(`gm-msg-${messageId}`);
-              console.log(`[GM+ Message Viewer] Found message element:`, messageElement);
-              
-              if (messageElement) {
-                console.log(`[GM+ Message Viewer] Successfully found and highlighting message ${messageId}`);
-                
-                // Scroll to position the message properly with smooth behavior
-                viewport.scrollTo({
-                  top: Math.max(0, targetScrollTop),
-                  behavior: 'smooth'
-                });
-                
-                // Add an observer to ensure the message stays visible after scrolling
-                const ensureVisibility = () => {
-                  const rect = messageElement.getBoundingClientRect();
-                  const viewportRect = viewport.getBoundingClientRect();
-                  
-                  // Check if message is cut off at top or bottom
-                  if (rect.top < viewportRect.top || rect.bottom > viewportRect.bottom) {
-                    console.log('[GM+ Message Viewer] Message partially cut off, adjusting scroll position');
-                    messageElement.scrollIntoView({ 
-                      behavior: 'smooth', 
-                      block: 'center', 
-                      inline: 'nearest' 
-                    });
-                  }
-                };
-                
-                // Check visibility after initial scroll completes
-                setTimeout(() => {
-                  ensureVisibility();
-                  
-                  // Add highlight after ensuring visibility
-                  setTimeout(() => {
-                    highlightMessage(messageElement, messageId);
-                    // Re-enable scroll handling after highlight is applied
-                    setTimeout(() => {
-                      isNavigating = false;
-                    }, 1500); // Wait for highlight to fade
-                  }, 200);
-                }, 500); // Wait for smooth scroll to complete
-                
-                found = true;
-                resolve();
-              } else {
-                console.warn(`[GM+ Message Viewer] Message element not found in DOM, checking all elements...`);
-                const allMessageElements = container.querySelectorAll('[id^="gm-msg-"]');
-                console.log(`[GM+ Message Viewer] All message elements in container:`, Array.from(allMessageElements).map(el => el.id));
-                
-                let retries = 3;
-                const retryFind = () => {
-                  setTimeout(() => {
-                    const retryElement = document.getElementById(`gm-msg-${messageId}`);
-                    if (retryElement) {
-                      console.log(`[GM+ Message Viewer] Found message element on retry`);
-                      viewport.scrollTo({
-                        top: Math.max(0, targetScrollTop),
-                        behavior: 'smooth'
-                      });
-                      setTimeout(() => {
-                        // Check visibility on retry too
-                        const rect = retryElement.getBoundingClientRect();
-                        const viewportRect = viewport.getBoundingClientRect();
-                        if (rect.top < viewportRect.top || rect.bottom > viewportRect.bottom) {
-                          retryElement.scrollIntoView({ 
-                            behavior: 'smooth', 
-                            block: 'center', 
-                            inline: 'nearest' 
-                          });
-                        }
-                        setTimeout(() => {
-                          highlightMessage(retryElement, messageId);
-                          setTimeout(() => {
-                            isNavigating = false;
-                          }, 1500);
-                        }, 200);
-                      }, 300);
-                      found = true;
-                      resolve();
-                    } else if (retries > 0) {
-                      retries--;
-                      retryFind();
-                    } else {
-                      console.warn(`[GM+ Message Viewer] Failed to find message element after retries`);
-                      isNavigating = false;
-                      resolve();
-                    }
-                  }, 200);
-                };
-                retryFind();
-              }
-            }, 150); // Small delay to allow DOM to update
-          });
-          
-          break;
-        } else {
-          console.log(`[GM+ Message Viewer] Target not in chunk, rendering for progress...`);
-          updateVirtualScroll(container);
-          
-          await new Promise(resolve => setTimeout(resolve, 50));
-        }
-      }
-      
-      if (!found) {
-        console.warn(`[GM+ Message Viewer] Message ${messageId} not found in any chunk`);
-        console.log(`[GM+ Message Viewer] Searched ${allMessages.length} total messages`);
-        Modal.alert('Message Not Found', 'The target message was not found in the current chat. It may have been deleted or is from a different conversation.', 'error');
-      }
+        setTimeout(()=>{ isNavigating = false; }, 1800);
+      }, 150);
     };
     
     const renderReactions = (reactions) => {
@@ -2265,22 +1610,26 @@
       
       const reactionCounts = {};
       reactions.forEach(reaction => {
-        let emoji;
+        let emoji = '⬆️'; // default for custom / non-unicode
         if (reaction.type === 'unicode' && reaction.code) {
-          // Use the actual Unicode emoji for unicode type
-          emoji = reaction.code;
-        } else {
-          // For 'emoji' type or missing type, use generic heart since custom emojis are complex
-          emoji = '❤️';
+          // reaction.code may already be the emoji, but if it's a hex code like '1f44d' convert it
+            if (/^[0-9a-fA-F]{4,8}$/.test(reaction.code)) {
+              try {
+                const codePoints = reaction.code.split('-').map(cp => parseInt(cp, 16));
+                emoji = String.fromCodePoint(...codePoints);
+              } catch (e) {
+                emoji = reaction.code; // fallback to raw
+              }
+            } else {
+              emoji = reaction.code;
+            }
         }
-        
+        if (!emoji) emoji = '⬆️';
+        const increment = reaction.user_ids ? reaction.user_ids.length : 1;
         if (reactionCounts[emoji]) {
-          reactionCounts[emoji].count += reaction.user_ids ? reaction.user_ids.length : 1;
+          reactionCounts[emoji].count += increment;
         } else {
-          reactionCounts[emoji] = {
-            count: reaction.user_ids ? reaction.user_ids.length : 1,
-            type: reaction.type || 'emoji'
-          };
+          reactionCounts[emoji] = { count: increment, type: reaction.type || 'emoji' };
         }
       });
       
@@ -2323,7 +1672,7 @@
               url = `https://www.google.com/maps?q=${att.lat},${att.lng}`;
             }
             break;
-          case 'reply':
+          case 'reply': {
             // Handle reply attachments specially - these should navigate to the replied message
             const replyText = att.text || att.reply_text || 'Reply';
             const repliedMessageId = att.reply_id || att.base_reply_id;
@@ -2331,7 +1680,7 @@
             if (repliedMessageId) {
               return `<div class="gm-message-attachment gm-message-reply-attachment" data-reply-id="${repliedMessageId}" style="cursor:pointer;border-left:3px solid #667eea;padding-left:8px;">${content}</div>`;
             }
-            break;
+            break; }
           default:
             content = `📎 ${att.type || 'Attachment'}${att.name ? `: ${att.name}` : ''}`;
             isClickable = !!att.url;
@@ -2409,18 +1758,15 @@
       let startIndex, endIndex;
       
       if (targetMessageIndex !== null) {
-        // Direct positioning to target message
-        const contextSize = Math.floor(itemsPerPage / 2); // Show context around target
+        const contextSize = Math.floor(itemsPerPage / 2);
         startIndex = Math.max(0, targetMessageIndex - contextSize);
         endIndex = Math.min(startIndex + itemsPerPage + (BUFFER_SIZE * 2), allMessages.length);
         
-        // Adjust if we're near the end
         if (endIndex >= allMessages.length) {
           endIndex = allMessages.length;
           startIndex = Math.max(0, endIndex - itemsPerPage - (BUFFER_SIZE * 2));
         }
       } else {
-        // Normal scroll-based positioning
         startIndex = Math.max(0, Math.floor(scrollTop / ITEM_HEIGHT) - BUFFER_SIZE);
         endIndex = Math.min(
           startIndex + itemsPerPage + (BUFFER_SIZE * 2),
@@ -2444,22 +1790,9 @@
           </div>
         </div>
       `;
+
       
-      // If we're directly positioning to a target message, scroll to it with better centering
-      if (targetMessageIndex !== null) {
-        const relativeIndex = targetMessageIndex - startIndex;
-        const targetScrollTop = offsetY + (relativeIndex * ITEM_HEIGHT);
-        
-        // Center the target message in the viewport with padding
-        const centeredScrollTop = targetScrollTop - (viewportHeight / 2) + (ITEM_HEIGHT / 2) + 40;
-        
-        setTimeout(() => {
-          viewport.scrollTo({
-            top: Math.max(40, centeredScrollTop), // Ensure we don't scroll above padding
-            behavior: 'smooth'
-          });
-        }, 100);
-      }
+  // Removed internal auto-centering scroll to avoid double-jolt; navigateToMessage handles centering once
       
       // add click handlers for message details
       viewport.querySelectorAll('.gm-message-item').forEach(item => {
@@ -2590,6 +1923,29 @@
         viewport.innerHTML = '<div class="gm-no-messages">Error loading messages</div>';
       }
     };
+
+    if (!document.getElementById('gm-plus-reaction-styles')) {
+      const style = document.createElement('style');
+      style.id = 'gm-plus-reaction-styles';
+      style.textContent = `
+        .gm-message-reactions { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+        .gm-message-reaction { background:#2d2d2d; border-radius:16px; padding:2px 6px; display:inline-flex; align-items:center; font-size:12px; line-height:1; }
+        .gm-message-reaction-emoji { margin-right:4px; }
+      `;
+      const append = () => {
+        const headEl = document.head || document.getElementsByTagName('head')[0] || document.documentElement;
+        if (headEl) {
+          headEl.appendChild(style);
+        }
+      };
+      if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', () => {
+          if (!document.getElementById('gm-plus-reaction-styles')) append();
+        });
+      } else {
+        append();
+      }
+    }
     
     const populateChatSelector = async (selector) => {
       try {
@@ -2709,7 +2065,7 @@
       
       title.textContent = 'Message Viewer';
       
-      body.innerHTML = `
+    body.innerHTML = `
         <div class="gm-message-viewer-header">
           <select class="gm-chat-selector">
             <option value="">Loading chats...</option>
@@ -2717,7 +2073,7 @@
           <div class="gm-message-count">0 messages</div>
         </div>
         <div class="gm-messages-container">
-          <div class="gm-messages-viewport" style="height: 95vh; overflow-y: auto; position: relative;">
+      <div class="gm-messages-viewport">
             <div class="gm-no-messages">Select a chat to view messages</div>
           </div>
         </div>
@@ -3171,7 +2527,10 @@
     const searchResults = document.createElement('div');
     searchResults.style.cssText = 'max-height: 300px; overflow-y: auto; margin-top: 8px; display: none;';
     
-    searchSection.append(searchTitle, searchInput, filtersContainer, searchButtonRow, searchResults);
+  searchSection.append(searchTitle, searchInput, filtersContainer, searchButtonRow, searchResults);
+  // Expose for cross-pane handlers (e.g., cache clear)
+  window.__gmPlusSearchResultsEl = searchResults;
+  window.__gmPlusSearchInputEl = searchInput;
     pane.appendChild(searchSection);
 
     let currentSearchResults = [];
@@ -4184,8 +3543,10 @@
           message = `No cached messages found.\nFull fetch will download all messages.`;
           fetchBtn.textContent = 'Smart Fetch (Full Download)';
         } else {
-          message = `Cache Analysis:\n\n• ${boundaries.count} messages cached\n• From: ${boundaries.oldestDate.toLocaleDateString()}\n• To: ${boundaries.newestDate.toLocaleDateString()}\n\nSmart fetch will only download new messages since ${boundaries.newestDate.toLocaleDateString()}.`;
-          fetchBtn.textContent = `Smart Fetch (New Since ${boundaries.newestDate.toLocaleDateString()})`;
+          const oldestStr = boundaries.oldestDate ? boundaries.oldestDate.toLocaleDateString() : 'Unknown';
+          const newestStr = boundaries.newestDate ? boundaries.newestDate.toLocaleDateString() : 'Unknown';
+          message = `Cache Analysis:\n\n• ${boundaries.count} messages cached\n• From: ${oldestStr}\n• To: ${newestStr}\n\nSmart fetch will only download new messages since ${newestStr}.`;
+          fetchBtn.textContent = `Smart Fetch (New Since ${newestStr})`;
         }
         
         Modal.alert('Cache Analysis', message, 'info');
@@ -4253,14 +3614,17 @@
           setTimeout(() => {
             fetchBtn.textContent = originalText;
           }, 3000);
-          Modal.alert('Already Up to Date', `Cache is current with ${total} messages.\nLatest message: ${result.boundaries.newestDate.toLocaleString()}`, 'info');
+          const latestStr = result.boundaries.newestDate ? result.boundaries.newestDate.toLocaleString() : 'Unknown';
+          Modal.alert('Already Up to Date', `Cache is current with ${total} messages.\nLatest message: ${latestStr}`, 'info');
         } else {
           total = result.boundaries.count + result.newMessages.length;
           fetchBtn.textContent = 'Fetch Successful';
           setTimeout(() => {
             fetchBtn.textContent = originalText;
           }, 3000);
-          Modal.alert('Smart Fetch Complete', `Found ${result.newMessages.length} new messages!\n\nTotal cached: ${total} messages\nLatest: ${new Date(result.newMessages[0]?.created_at * 1000 || result.boundaries.newest.created_at * 1000).toLocaleString()}`, 'info');
+          const latestTs = result.newMessages[0]?.created_at || result.boundaries.newest?.created_at;
+          const latestStr = latestTs ? new Date(latestTs * 1000).toLocaleString() : 'Unknown';
+          Modal.alert('Smart Fetch Complete', `Found ${result.newMessages.length} new messages!\n\nTotal cached: ${total} messages\nLatest: ${latestStr}`, 'info');
         }
         
       } catch (error) {
@@ -4340,9 +3704,8 @@
               }
               
               await new Promise(resolve => setTimeout(resolve, backoffTime));
-              continue; // Retry the same request
+              continue;
             } else if (resp.status === 304) {
-              // No more messages
               console.log(`[GM+ Legacy Fetch] No more messages (304)`);
               break;
             } else {
@@ -4351,7 +3714,6 @@
             }
           }
           
-          // Reset retry count on success
           retryCount = 0;
           
           const jd = await resp.json();
@@ -4374,7 +3736,7 @@
           
           beforeId = msgs[msgs.length - 1].id;
           
-          // Small delay to be nice to the API
+          // Small delay to be nice to the silly API
           await new Promise(resolve => setTimeout(resolve, 10));
           
         } catch (error) {
@@ -4421,34 +3783,35 @@
     const managementGrid = document.createElement('div');
     managementGrid.style.cssText = 'display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px;';
     
-    const statsBtn = document.createElement('button'); 
-    statsBtn.textContent = 'Cache Stats';
-    statsBtn.className = 'gm-btn';
-    statsBtn.style.cssText = 'background:#6c757d;';
     
     const validateBtn = document.createElement('button'); 
     validateBtn.textContent = 'Validate Cache';
     validateBtn.className = 'gm-btn';
     validateBtn.style.cssText = 'background:#17a2b8;';
     
-    const backupBtn = document.createElement('button'); 
-    backupBtn.textContent = 'Backup Cache';
-    backupBtn.className = 'gm-btn';
-    backupBtn.style.cssText = 'background:#28a745;';
+  const backupBtn = document.createElement('button'); 
+  backupBtn.textContent = 'Backup Cache';
+  backupBtn.className = 'gm-btn';
+  backupBtn.style.cssText = 'background:#28a745;';
+
+  const importBtn = document.createElement('button');
+  importBtn.textContent = 'Import Backup';
+  importBtn.className = 'gm-btn';
+  importBtn.style.cssText = 'background:#007bff;';
     
     const cleanupBtn = document.createElement('button'); 
     cleanupBtn.textContent = 'Smart Cleanup';
     cleanupBtn.className = 'gm-btn';
     cleanupBtn.style.cssText = 'background:#f57c00;color:#000;';
     
-    managementGrid.append(statsBtn, validateBtn, backupBtn, cleanupBtn);
+  managementGrid.append(validateBtn, backupBtn, importBtn, cleanupBtn);
     
     // Import/Export row
     const importExportRow = document.createElement('div');
     importExportRow.style.cssText = 'display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px;';
     
     const exportBtn = document.createElement('button'); 
-    exportBtn.textContent = 'Export CSV';
+    exportBtn.textContent = 'Export Cache';
     exportBtn.className = 'gm-btn';
     exportBtn.style.cssText = 'background:#388e3c;';
     
@@ -4508,68 +3871,6 @@
     // Initialize storage info
     updateStorageInfo();
     
-    statsBtn.onclick = async () => {
-      try {
-        if (!Cache) {
-          Modal.alert('Cache Unavailable', 'Cache not available', 'error');
-          return;
-        }
-        
-        const [stats, validation] = await Promise.all([
-          Cache.stats(),
-          Cache.validate()
-        ]);
-        
-        const sizeInMB = (validation.totalSize / (1024 * 1024)).toFixed(2);
-        
-        const statsHtml = `
-          <div class="gm-modal-stats">
-            <div class="gm-modal-stat">
-              <div class="gm-modal-stat-value">${stats.messages.toLocaleString()}</div>
-              <div class="gm-modal-stat-label">Messages Cached</div>
-            </div>
-            <div class="gm-modal-stat">
-              <div class="gm-modal-stat-value">${stats.edits.toLocaleString()}</div>
-              <div class="gm-modal-stat-label">Edits Tracked</div>
-            </div>
-            <div class="gm-modal-stat">
-              <div class="gm-modal-stat-value">${sizeInMB} MB</div>
-              <div class="gm-modal-stat-label">Storage Used</div>
-            </div>
-            <div class="gm-modal-stat">
-              <div class="gm-modal-stat-value">${validation.valid.toLocaleString()}</div>
-              <div class="gm-modal-stat-label">Valid Messages</div>
-            </div>
-          </div>
-          <div style="margin-top: 16px;">
-            <div style="background:#222;padding:8px;border-radius:4px;margin-bottom:8px;">
-              <strong style="color:#667eea;">Cache Health:</strong> 
-              <span style="color:${validation.invalid === 0 ? '#28a745' : '#f57c00'};">
-                ${validation.invalid === 0 ? 'Excellent' : `${validation.invalid} issues found`}
-              </span>
-            </div>
-            ${validation.issues.length > 0 ? `
-              <div style="background:#1a1a1a;border:1px solid #333;border-radius:4px;padding:8px;">
-                <div style="color:#f57c00;font-size:12px;margin-bottom:4px;font-weight:600;">Cache Issues:</div>
-                ${validation.issues.slice(0, 5).map(issue => `<div style="color:#888;font-size:12px;">• ${issue}</div>`).join('')}
-                ${validation.issues.length > 5 ? `<div style="color:#666;font-size:11px;">... and ${validation.issues.length - 5} more</div>` : ''}
-              </div>
-            ` : `
-              <div style="background:#1a1a1a;border:1px solid #28a745;border-radius:4px;padding:12px;text-align:center;">
-                <div style="color:#28a745;font-size:16px;">✅ Cache is healthy!</div>
-                <div style="color:#888;font-size:12px;margin-top:4px;">No issues detected</div>
-              </div>
-            `}
-          </div>
-        `;
-        
-        Modal.alert('Detailed Cache Statistics', statsHtml, 'info');
-        
-      } catch (error) {
-        console.error('[GM+ Stats] Error:', error);
-        Modal.alert('Stats Error', `Failed to generate statistics: ${error.message}`, 'error');
-      }
-    };
 
     validateBtn.onclick = async () => {
       if (!Cache) {
@@ -4692,53 +3993,137 @@
     };
 
     exportBtn.onclick = async () => {
-      try {
-        if (!Cache) {
-          Modal.alert('Cache Unavailable', 'Cache not available - LZString library not loaded', 'error');
-          return;
-        }
-        exportBtn.textContent = 'Exporting...';
-        exportBtn.disabled = true;
-        const msgs = await Cache.all();
-        if (!msgs.length) {
-          Modal.alert('No Data', 'Cache is empty. No messages to export.', 'info');
-          return;
-        }
-        const csvHeaders = ['ID','Name','Message','Timestamp','Group ID','User ID','Sender Type','System','Message Type','Likes Count','Reactions','Pinned At','Pinned By','Platform','Avatar URL','Updated At','Source GUID','Attachments'];
-        const csvRows = msgs.map(m => [
-          `"${(m.id||'').replace(/"/g,'""')}"`,
-          `"${(m.name||'').replace(/"/g,'""')}"`,
-          `"${(m.text||'').replace(/"/g,'""')}"`,
-          m.created_at ? new Date(m.created_at*1000).toISOString() : '',
-          `"${(m.group_id||'').replace(/"/g,'""')}"`,
-          `"${(m.user_id||'').replace(/"/g,'""')}"`,
-          `"${(m.sender_type||'').replace(/"/g,'""')}"`,
-          m.system ? 'true' : 'false',
-          `"${(m.message_type||'').replace(/"/g,'""')}"`,
-          (m.likes_count||0).toString(),
-          `"${m.reactions?JSON.stringify(m.reactions).replace(/"/g,'""'):''}"`,
-          m.pinned_at?new Date(m.pinned_at*1000).toISOString():'',
-          `"${(m.pinned_by||'').replace(/"/g,'""')}"`,
-          `"${(m.platform||'').replace(/"/g,'""')}"`,
-          `"${(m.avatar_url||'').replace(/"/g,'""')}"`,
-          m.updated_at?new Date(m.updated_at*1000).toISOString():'',
-          `"${(m.source_guid||'').replace(/"/g,'""')}"`,
-          `"${m.attachments?JSON.stringify(m.attachments).replace(/"/g,'""'):''}"`
-        ].join(','));
-        const csv = [csvHeaders.join(','), ...csvRows].join('\r\n');
-        const blob = new Blob([csv], { type: 'text/csv' });
-        const a = document.createElement('a');
-        a.href = URL.createObjectURL(blob);
-        a.download = `groupme_export_${Date.now()}.csv`;
-        a.click();
-        Modal.alert('Export Complete', `Successfully exported ${msgs.length.toLocaleString()} messages to CSV`, 'info');
-      } catch (error) {
-        console.error('[GM+ Cache] Export error:', error);
-        Modal.alert('Export Error', `Error exporting cache:\n\n${error.message}`, 'error');
-      } finally {
-        exportBtn.textContent = 'Export CSV';
-        exportBtn.disabled = false;
-      }
+      if (!Cache) return Modal.alert('Cache Unavailable', 'Cache not available', 'error');
+      const modal = Modal.create();
+      modal.title.textContent = 'Export Messages';
+      const body = document.createElement('div');
+      body.style.cssText = 'font-size:12px;color:#ddd;';
+      body.innerHTML = `
+        <div style="margin-bottom:12px;">
+          <label style="display:block;margin-bottom:4px;font-weight:600;color:#fff;">Format</label>
+          <select id="gm-export-format" style="width:100%;padding:6px;background:#111;color:#fff;border:1px solid #333;border-radius:4px;">
+            <option value="csv">CSV</option>
+            <option value="json">JSON</option>
+          </select>
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:4px;max-height:220px;overflow:auto;border:1px solid #222;padding:6px;border-radius:4px;background:#0f0f0f;margin-bottom:12px;" id="gm-export-fields"></div>
+        <div style="margin-bottom:8px;">
+          <label style="display:block;margin-bottom:4px;font-weight:600;color:#fff;">Filters (optional)</label>
+          <input id="gm-export-group" placeholder="Group ID" style="width:100%;padding:6px;margin-bottom:4px;background:#111;color:#fff;border:1px solid #333;border-radius:4px;" />
+          <input id="gm-export-user" placeholder="User ID" style="width:100%;padding:6px;background:#111;color:#fff;border:1px solid #333;border-radius:4px;" />
+        </div>
+        <div style="color:#888;font-size:11px;">Select the fields to include. Large exports may take time.</div>`;
+      const fields = [
+        ['id','ID'],['name','Name'],['text','Message'],['created_at','Timestamp'],['group_id','Group ID'],['user_id','User ID'],['sender_type','Sender Type'],['system','System'],['message_type','Message Type'],['likes_count','Likes Count'],['reactions','Reactions'],['pinned_at','Pinned At'],['pinned_by','Pinned By'],['platform','Platform'],['avatar_url','Avatar URL'],['updated_at','Updated At'],['source_guid','Source GUID'],['attachments','Attachments']
+      ];
+      const fieldContainer = body.querySelector('#gm-export-fields');
+      fields.forEach(([key,label]) => {
+        const id = 'gm-exp-'+key;
+        const wrap = document.createElement('label');
+        wrap.style.cssText='display:flex;align-items:center;gap:4px;background:#1a1a1a;padding:4px;border:1px solid #222;border-radius:3px;font-size:11px;';
+        wrap.innerHTML = `<input type="checkbox" id="${id}" value="${key}" ${['id','text','created_at'].includes(key)?'checked':''}/> <span>${label}</span>`;
+        fieldContainer.appendChild(wrap);
+      });
+      modal.body.appendChild(body);
+      const exportBtnInner = document.createElement('button');
+      exportBtnInner.textContent = 'Export';
+      exportBtnInner.className = 'gm-btn';
+      exportBtnInner.style.cssText='background:#28a745;width:100%;margin-top:8px;';
+      modal.footer.appendChild(exportBtnInner);
+      exportBtnInner.onclick = async () => {
+        try {
+          exportBtnInner.disabled = true; exportBtnInner.textContent='Working...';
+          const allMsgs = await Cache.all();
+          if (!allMsgs.length) return Modal.alert('No Data','No messages to export','info');
+          const format = modal.body.querySelector('#gm-export-format').value;
+          const groupFilter = modal.body.querySelector('#gm-export-group').value.trim();
+          const userFilter = modal.body.querySelector('#gm-export-user').value.trim();
+          let msgs = allMsgs;
+          if (groupFilter) msgs = msgs.filter(m=>m.group_id===groupFilter);
+          if (userFilter) msgs = msgs.filter(m=>m.user_id===userFilter || m.sender_id===userFilter);
+          const selected = [...modal.body.querySelectorAll('#gm-export-fields input:checked')].map(i=>i.value);
+          if (!selected.length) return Modal.alert('No Fields','Select at least one field to export','error');
+          if (format==='json') {
+            const simplified = msgs.map(m=>{ const o={}; selected.forEach(k=>{ o[k]=m[k]; }); return o; });
+            const blob = new Blob([JSON.stringify(simplified,null,2)],{type:'application/json'});
+            const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=`groupme_export_${Date.now()}.json`; a.click();
+            Modal.alert('Export Complete',`Exported ${simplified.length.toLocaleString()} messages (JSON)`,'info');
+          } else {
+            const header = selected.map(h=>`"${h.replace(/"/g,'""')}"`).join(',');
+            const rows = msgs.map(m=> selected.map(f=> {
+              let v = m[f];
+              if (f==='created_at' || f==='updated_at' || f==='pinned_at') v = v? new Date(v*1000).toISOString():'';
+              if (f==='system') v = !!v;
+              if (f==='attachments' || f==='reactions') v = v? JSON.stringify(v):'';
+              if (v==null) v='';
+              const s = String(v).replace(/"/g,'""');
+              return `"${s}"`;
+            }).join(','));
+            const csv = [header,...rows].join('\r\n');
+            const blob = new Blob([csv],{type:'text/csv'});
+            const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=`groupme_export_${Date.now()}.csv`; a.click();
+            Modal.alert('Export Complete',`Exported ${msgs.length.toLocaleString()} messages (CSV)`,'info');
+          }
+          modal.close();
+        } catch(e){
+          console.error('[GM+ Export] Error:', e);
+          Modal.alert('Export Error', e.message,'error');
+        } finally { exportBtnInner.disabled=false; exportBtnInner.textContent='Export'; }
+      };
+      modal.show();
+    };
+
+    importBtn.onclick = () => {
+      if (!Cache) return Modal.alert('Cache Unavailable','Cache not available','error');
+      const modal = Modal.create();
+      modal.title.textContent='Import Backup';
+      const body = document.createElement('div');
+      body.style.cssText='font-size:12px;color:#ddd;';
+      body.innerHTML = `
+        <input type="file" id="gm-import-file" accept="application/json" style="width:100%;padding:8px;background:#111;color:#fff;border:1px solid #333;border-radius:4px;margin-bottom:12px;" />
+        <div style="margin-bottom:8px;">
+          <label style="display:flex;align-items:center;gap:6px;">
+            <input type="checkbox" id="gm-import-merge" checked /> <span>Merge with existing cache (uncheck to clear then import)</span>
+          </label>
+        </div>
+        <div style="color:#888;font-size:11px;">Large imports may freeze the tab briefly. Data is stored compressed.</div>`;
+      modal.body.appendChild(body);
+      const importBtnInner = document.createElement('button');
+      importBtnInner.textContent='Start Import';
+      importBtnInner.className='gm-btn';
+      importBtnInner.style.cssText='background:#28a745;width:100%;margin-top:8px;';
+      modal.footer.appendChild(importBtnInner);
+      importBtnInner.onclick = async () => {
+        const fileInput = modal.body.querySelector('#gm-import-file');
+        const merge = modal.body.querySelector('#gm-import-merge').checked;
+        const file = fileInput.files?.[0];
+        if (!file) return Modal.alert('No File','Choose a backup file first','error');
+        try {
+          importBtnInner.disabled=true; importBtnInner.textContent='Importing...';
+          const text = await file.text();
+          const json = JSON.parse(text);
+          if (!json.messages || !Array.isArray(json.messages)) throw new Error('Invalid backup file');
+          if (!merge) {
+            // clear existing cache
+            const db = await Cache.open();
+            await new Promise((res,rej)=>{ const tx=db.transaction(['messages','edits'],'readwrite'); tx.objectStore('messages').clear(); tx.objectStore('edits').clear?.(); tx.oncomplete=()=>res(); tx.onerror=()=>rej(tx.error); });
+          }
+            // store messages in batches of 500
+          const batchSize = 500; let stored = 0;
+          for (let i=0;i<json.messages.length;i+=batchSize) {
+            const slice = json.messages.slice(i,i+batchSize);
+            const batch = Object.fromEntries(slice.map(m=>[m.id,m]));
+            await Cache.store(batch); stored += slice.length;
+          }
+          Modal.alert('Import Complete',`Imported ${json.messages.length.toLocaleString()} messages${merge?' (merged)':''}.`,'info');
+          await updateStorageInfo();
+          modal.close();
+        } catch(e){
+          console.error('[GM+ Import] Error:', e);
+          Modal.alert('Import Error', e.message,'error');
+        } finally { importBtnInner.disabled=false; importBtnInner.textContent='Start Import'; }
+      };
+      modal.show();
     };
     cleanupBtn.onclick = async () => {
       try {
@@ -4792,8 +4177,8 @@
               new Promise((resolve, reject) => { const r = tx.objectStore('editHistory').clear(); r.onsuccess = () => resolve(); r.onerror = () => reject(r.error); })
             ]);
             Modal.alert('Cache Cleared', 'Cache cleared successfully.', 'info');
-            searchResults.style.display = 'none';
-            searchInput.value = '';
+            if (window.__gmPlusSearchResultsEl) window.__gmPlusSearchResultsEl.style.display = 'none';
+            if (window.__gmPlusSearchInputEl) window.__gmPlusSearchInputEl.value = '';
           } catch (error) {
             console.error('[GM+ Cache] Clear error:', error);
             Modal.alert('Clear Error', `Error clearing cache:\n\n${error.message}`, 'error');
