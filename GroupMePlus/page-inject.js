@@ -1,7 +1,6 @@
 (function () {
   'use strict';
   
-  // Store for tracking message state and detecting edits
   const messageStore = new Map();
   let interceptCount = 0;
 
@@ -22,7 +21,6 @@
     return response;
   };
 
-  // XHR interception
   const originalXHROpen = XMLHttpRequest.prototype.open;
   XMLHttpRequest.prototype.open = function (method, url, ...rest) {
     if (isGroupMeAPI(url)) {
@@ -40,14 +38,12 @@
     return originalXHROpen.apply(this, [method, url, ...rest]);
   };
 
-  // WebSocket interception for real-time messages
   const originalWebSocket = window.WebSocket;
   window.WebSocket = function (...args) {
     const ws = new originalWebSocket(...args);
     
     console.log('📡 WebSocket connection established:', args[0]);
     
-    // Override onmessage to intercept all messages
     const originalOnMessage = ws.onmessage;
     ws.onmessage = function(event) {
       try {
@@ -60,13 +56,11 @@
         console.warn('📡 WebSocket message parsing failed:', err);
       }
       
-      // Call original handler if it exists
       if (originalOnMessage) {
         return originalOnMessage.call(this, event);
       }
     };
     
-    // Also listen for message events
     ws.addEventListener('message', function (event) {
       try {
         const data = JSON.parse(event.data);
@@ -233,7 +227,6 @@
     }
   }
 
-  // Handle real-time messages with validation
   function handleRealtimeMessage(data) {
     try {
       const message = data.data || data.message || data;
@@ -400,7 +393,6 @@
     return message;
   }
 
-  // Periodic cleanup of message store
   setInterval(() => {
     const cutoff = Date.now() - (24 * 60 * 60 * 1000); // 24 hours
     let cleaned = 0;

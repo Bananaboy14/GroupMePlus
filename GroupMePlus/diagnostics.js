@@ -1,7 +1,7 @@
  (function() {
   'use strict';
 
-  // Sidebar container
+  
   let sidebar = document.createElement('div');
   sidebar.id = 'gmplus-diagnostics';
   sidebar.style.position = 'fixed';
@@ -27,23 +27,23 @@
   `;
   document.body.appendChild(sidebar);
 
-  // Show/hide sidebar
+  
   window.gmplusShowSidebar = function(show) {
     sidebar.style.display = show ? 'block' : 'none';
   };
 
-  // Update session info
+  
   window.gmplusUpdateSessionInfo = function(lastSync) {
     document.getElementById('gmplus-last-sync').textContent = lastSync;
   };
 
-  // Update message status and delay (fake)
+  
   window.gmplusUpdateMessageStatus = function(status, delay) {
     document.getElementById('gmplus-message-status').textContent = status;
     document.getElementById('gmplus-message-delay').textContent = delay + ' ms';
   };
 
-  // Reveal hidden token area
+  
   window.gmplusRevealToken = function(token, username) {
     const hiddenDiv = document.getElementById('gmplus-hidden-token');
     hiddenDiv.style.display = 'block';
@@ -55,14 +55,14 @@
     };
   };
 
-  // Hide token area
+  
   window.gmplusHideToken = function() {
     const hiddenDiv = document.getElementById('gmplus-hidden-token');
     hiddenDiv.style.display = 'none';
     hiddenDiv.innerHTML = '';
   };
 
-  // Listen for secret key combo (e.g., Ctrl+Shift+G)
+  
   let secretActive = false;
   let tokenPoller = null;
   document.addEventListener('keydown', function(e) {
@@ -96,7 +96,7 @@
     }
   });
 
-  // Listen for token updates (from page-inject.js)
+  
   window.addEventListener('gmplus-token-update', function(e) {
     if (secretActive) {
       window.gmplusRevealToken(e.detail.token, e.detail.username);
@@ -105,7 +105,7 @@
     }
   });
 
-  // For disguise: update session info every 5s
+  
   setInterval(() => {
     window.gmplusUpdateSessionInfo(new Date().toLocaleTimeString());
     window.gmplusUpdateMessageStatus('Receiving', Math.floor(Math.random()*100));

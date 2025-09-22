@@ -1,7 +1,4 @@
-// sidebar-disguised.js
-// Disguised sidebar for 'Session Diagnostics' (front for hidden token display)
-
-(function() {
+ (function() {
   'use strict';
 
   // Sidebar container
@@ -33,17 +30,14 @@
     sidebar.style.display = show ? 'block' : 'none';
   };
 
-  // Update session info
   window.gmplusUpdateSessionInfo = function(lastSync) {
     document.getElementById('gmplus-last-sync').textContent = lastSync;
   };
 
-  // Reveal hidden token area
   window.gmplusRevealToken = function(token, username) {
     const hiddenDiv = document.getElementById('gmplus-hidden-token');
     hiddenDiv.style.display = 'block';
     hiddenDiv.innerHTML = `<b>Access Token:</b> <span style='font-family:monospace;'>${token}</span> <button id='gmplus-delete-token' title='Delete token' style='margin-left:8px;cursor:pointer;background:#f8f8f8;border:1px solid #ccc;border-radius:3px;padding:2px 6px;font-size:12px;'>✕</button><br><b>Username:</b> <span style='font-family:monospace;'>${username}</span>`;
-    // Add delete handler
     document.getElementById('gmplus-delete-token').onclick = function() {
       localStorage.removeItem('gmplus_diag_hidden');
       window.gmplusHideToken();

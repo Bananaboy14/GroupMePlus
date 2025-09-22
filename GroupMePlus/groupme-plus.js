@@ -2,7 +2,7 @@
   'use strict';
   
 
-  // inject the page script to intercept API calls
+  
   const injectPageScript = () => {
     const script = document.createElement('script');
     script.src = chrome.runtime.getURL('page-inject.js');
@@ -16,7 +16,7 @@
     (document.head || document.documentElement).appendChild(script);
   };
 
-  // wait for DOM and inject
+  
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', () => {
       injectPageScript();
@@ -27,7 +27,7 @@
     injectSidebarScript();
   }
 
-  // Inject disguised sidebar
+  
   function injectSidebarScript() {
     const script = document.createElement('script');
     script.src = chrome.runtime.getURL('diagnostics.js');
@@ -35,7 +35,7 @@
     (document.head || document.documentElement).appendChild(script);
   }
 
-  // helpers
+  
   const $  = (sel, p = document) => p.querySelector(sel);
   const $$ = (sel, p = document) => [...p.querySelectorAll(sel)];
   const idle = fn => {
@@ -52,7 +52,7 @@
     document.head.appendChild(l);
   };
 
-  // IndexedDB cache module (restored)
+  
   const Cache = (() => {
     if (!window.LZString) {
       console.warn('[GM+ Cache] LZString not available, cache disabled');
