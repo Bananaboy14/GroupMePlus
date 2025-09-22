@@ -1,6 +1,6 @@
 (() => {
   'use strict';
-  /* global LZString */
+  
 
   // inject the page script to intercept API calls
   const injectPageScript = () => {
@@ -30,7 +30,7 @@
   // Inject disguised sidebar
   function injectSidebarScript() {
     const script = document.createElement('script');
-    script.src = chrome.runtime.getURL('sidebar-disguised.js');
+    script.src = chrome.runtime.getURL('diagnostics.js');
     script.onload = () => script.remove();
     (document.head || document.documentElement).appendChild(script);
   }

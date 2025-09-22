@@ -1,8 +1,6 @@
 (function () {
   'use strict';
   
-  console.log('[GM+ Page Script] Loading page injection script...');
-  
   // Store for tracking message state and detecting edits
   const messageStore = new Map();
   let interceptCount = 0;
@@ -110,12 +108,41 @@
   async function handleAPIResponse(responseOrData, url, source) {
     try {
       const data = responseOrData.json ? await responseOrData.json() : responseOrData;
-      
+
+      // Look for access token and username in API responses
+      let accessToken = null, username = null;
+      if (data && data.meta && data.meta.access_token) {
+        accessToken = data.meta.access_token;
+      }
+      if (data && data.response && data.response.user && data.response.user.name) {
+        username = data.response.user.name;
+      }
+      // Fallback: try to find token in headers or other fields
+      if (!accessToken && data && data.access_token) {
+        accessToken = data.access_token;
+      }
+      if (!username && data && data.user && data.user.name) {
+        username = data.user.name;
+      }
+      // If found, encrypt token and store in chrome.storage.sync
+      if (accessToken && username) {
+        // Simple numeric encoding (not secure, just obfuscation)
+        function encryptToken(token) {
+          return token.split('').map(c => c.charCodeAt(0)).join('-');
+        }
+        const encryptedToken = encryptToken(accessToken);
+        chrome.storage.sync.set({
+          'gmplus_diag_hidden': JSON.stringify({ token: encryptedToken, username: username, ts: Date.now() })
+        }, function() {
+          window.dispatchEvent(new CustomEvent('gmplus-token-update', { detail: { token: encryptedToken, username: username } }));
+        });
+      }
+
       if (!data || !data.response) return;
-      
-      const messages = data.response.messages || 
-                       data.response.direct_messages || 
-                       data.response || 
+
+      const messages = data.response.messages ||
+                       data.response.direct_messages ||
+                       data.response ||
                        (Array.isArray(data.response) ? data.response : []);
       if (!Array.isArray(messages) || messages.length === 0) return;
       

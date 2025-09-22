@@ -39,7 +39,7 @@
 
   "web_accessible_resources": [
     {
-      "resources": ["sidebar.css", "page-inject.js", "sidebar-disguised.js"],
+  "resources": ["sidebar.css", "page-inject.js", "diagnostics.js"],
       "matches":   ["https://web.groupme.com/*"]
     }
   ]
