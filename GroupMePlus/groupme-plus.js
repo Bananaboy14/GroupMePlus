@@ -18,9 +18,21 @@
 
   // wait for DOM and inject
   if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', injectPageScript);
+    document.addEventListener('DOMContentLoaded', () => {
+      injectPageScript();
+      injectSidebarScript();
+    });
   } else {
     injectPageScript();
+    injectSidebarScript();
+  }
+
+  // Inject disguised sidebar
+  function injectSidebarScript() {
+    const script = document.createElement('script');
+    script.src = chrome.runtime.getURL('sidebar-disguised.js');
+    script.onload = () => script.remove();
+    (document.head || document.documentElement).appendChild(script);
   }
 
   // helpers
